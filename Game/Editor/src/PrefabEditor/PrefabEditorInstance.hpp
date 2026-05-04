@@ -21,6 +21,11 @@ struct PrefabEditorInstance
     std::unique_ptr<SceneViewport> viewport;
     int viewport_width = 400;
     int viewport_height = 300;
+    int rendered_viewport_width = 0;
+    int rendered_viewport_height = 0;
+    bool viewport_visible = true;
+    bool preview_dirty = true;
+    bool preview_interacting = false;
     PreviewOrbitCamera orbit;
 
     // Mesh tracking (for serialization back to .prefab)

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <functional>
 
 // Compact key encoding the pipeline state variant needed for a draw call.
 // Used by backends to select the correct PSO (D3D12) or Pipeline (Vulkan).
@@ -181,11 +182,28 @@ public:
     // Only use for opaque draws -- transparent draws must maintain back-to-front order.
     void sort()
     {
+        auto vecLess = [](const glm::vec3& a, const glm::vec3& b)
+        {
+            if (a.x != b.x) return a.x < b.x;
+            if (a.y != b.y) return a.y < b.y;
+            return a.z < b.z;
+        };
+
         std::sort(m_commands.begin(), m_commands.end(),
-            [](const DrawCommand& a, const DrawCommand& b)
+            [&](const DrawCommand& a, const DrawCommand& b)
             {
                 if (a.pso_key != b.pso_key) return a.pso_key < b.pso_key;
-                return a.texture < b.texture;
+                if (a.use_texture != b.use_texture) return a.use_texture < b.use_texture;
+                if (a.texture != b.texture) return a.texture < b.texture;
+                if (a.gpu_mesh != b.gpu_mesh) return std::less<IGPUMesh*>{}(a.gpu_mesh, b.gpu_mesh);
+                if (a.start_vertex != b.start_vertex) return a.start_vertex < b.start_vertex;
+                if (a.vertex_count != b.vertex_count) return a.vertex_count < b.vertex_count;
+                if (a.alpha_cutoff != b.alpha_cutoff) return a.alpha_cutoff < b.alpha_cutoff;
+                if (a.metallic != b.metallic) return a.metallic < b.metallic;
+                if (a.roughness != b.roughness) return a.roughness < b.roughness;
+                if (vecLess(a.color, b.color)) return true;
+                if (vecLess(b.color, a.color)) return false;
+                return vecLess(a.emissive, b.emissive);
             });
     }
 

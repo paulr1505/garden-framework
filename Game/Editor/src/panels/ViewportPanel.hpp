@@ -24,6 +24,7 @@ public:
     int width = 800;
     int height = 600;
     bool is_hovered = false;
+    bool is_visible = true;
 
     // Set by EditorApp during initialization
     ToolbarPanel* toolbar = nullptr;

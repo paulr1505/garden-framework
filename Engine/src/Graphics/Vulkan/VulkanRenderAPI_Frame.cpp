@@ -5,6 +5,65 @@
 #include <cstring>
 #include <array>
 
+RenderFrameStats VulkanRenderAPI::getLastFrameStats() const
+{
+    RenderFrameStats stats = m_lastFrameStats;
+    stats.backend_name = getAPIName();
+    return stats;
+}
+
+void VulkanRenderAPI::consumeFrameTiming(uint32_t frameIndex)
+{
+    if (!m_frameTimingSupported || !m_frameTimingPendingReadback[frameIndex] ||
+        m_frameTimingQueryPool == VK_NULL_HANDLE)
+        return;
+
+    const uint32_t base_query = frameIndex * kFrameTimingQueriesPerFrame;
+    uint64_t timestamps[kFrameTimingQueriesPerFrame] = {};
+    VkResult result = vkGetQueryPoolResults(device, m_frameTimingQueryPool, base_query,
+                                            kFrameTimingQueriesPerFrame, sizeof(timestamps),
+                                            timestamps, sizeof(uint64_t),
+                                            VK_QUERY_RESULT_64_BIT);
+    if (result == VK_SUCCESS && timestamps[1] >= timestamps[0])
+    {
+        const double elapsed_ms = (static_cast<double>(timestamps[1] - timestamps[0]) *
+                                   static_cast<double>(m_frameTimingTimestampPeriod)) /
+                                  1000000.0;
+        m_lastFrameStats.backend_name = getAPIName();
+        m_lastFrameStats.gpu_frame_ms_valid = true;
+        m_lastFrameStats.gpu_frame_ms = static_cast<float>(elapsed_ms);
+        m_lastFrameStats.completed_gpu_frame = ++m_completedTimingFrame;
+    }
+
+    m_frameTimingPendingReadback[frameIndex] = false;
+}
+
+void VulkanRenderAPI::beginFrameTiming()
+{
+    if (!m_frameTimingSupported || m_frameTimingQueryPool == VK_NULL_HANDLE ||
+        !frame_started || current_frame >= MAX_FRAMES_IN_FLIGHT)
+        return;
+
+    const uint32_t base_query = current_frame * kFrameTimingQueriesPerFrame;
+    vkCmdWriteTimestamp(command_buffers[current_frame], VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        m_frameTimingQueryPool, base_query);
+    m_frameTimingActive[current_frame] = true;
+    m_frameTimingPendingReadback[current_frame] = false;
+}
+
+void VulkanRenderAPI::endFrameTiming()
+{
+    if (!m_frameTimingSupported || m_frameTimingQueryPool == VK_NULL_HANDLE ||
+        !m_frameTimingActive[current_frame] || !frame_started)
+        return;
+
+    const uint32_t base_query = current_frame * kFrameTimingQueriesPerFrame;
+    vkCmdWriteTimestamp(command_buffers[current_frame], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        m_frameTimingQueryPool, base_query + 1);
+    m_frameTimingActive[current_frame] = false;
+    m_frameTimingPendingReadback[current_frame] = true;
+}
+
 // Frame management
 void VulkanRenderAPI::prepareFrame()
 {
@@ -44,6 +103,16 @@ void VulkanRenderAPI::prepareFrame()
 
     // Process deferred deletions (safe now that fence has signaled)
     deletion_queue.flush();
+    consumeFrameTiming(current_frame);
+
+    if (m_vsyncDirty) {
+        m_vsyncDirty = false;
+        recreateSwapchain();
+        if (swapchain == VK_NULL_HANDLE || swapchain_extent.width == 0 || swapchain_extent.height == 0) {
+            frame_started = false;
+            return;
+        }
+    }
 
     // Acquire next image
     VkResult result = vkAcquireNextImageKHR(device, swapchain, FENCE_TIMEOUT_NS,
@@ -82,6 +151,11 @@ void VulkanRenderAPI::prepareFrame()
 
     // Reset per-object dynamic UBO draw counter
     per_object_draw_index[current_frame] = 0;
+    instance_data_index[current_frame] = 0;
+    m_lastFrameStats.submitted_draw_commands = 0;
+    m_lastFrameStats.backend_draw_calls = 0;
+    m_lastFrameStats.instanced_batches = 0;
+    m_lastFrameStats.instanced_instances = 0;
 
     // Reset per-thread command pools and descriptor pools for parallel replay
     // Only reset the current frame's pool — the other frame's secondary buffers may still be pending.
@@ -97,6 +171,14 @@ void VulkanRenderAPI::prepareFrame()
         tp.texture_cache.clear();
     }
     using_continuation_pass = false;
+
+    if (m_frameTimingSupported && m_frameTimingQueryPool != VK_NULL_HANDLE)
+    {
+        const uint32_t base_query = current_frame * kFrameTimingQueriesPerFrame;
+        vkResetQueryPool(device, m_frameTimingQueryPool, base_query, kFrameTimingQueriesPerFrame);
+        m_frameTimingActive[current_frame] = false;
+        m_frameTimingPendingReadback[current_frame] = false;
+    }
 
     // Reset command buffer
     vkResetCommandBuffer(command_buffers[current_frame], 0);
@@ -116,6 +198,7 @@ void VulkanRenderAPI::prepareFrame()
     bound_texture = INVALID_TEXTURE;
 
     frame_started = true;
+    beginFrameTiming();
 }
 
 void VulkanRenderAPI::beginFrame()
@@ -405,6 +488,7 @@ void VulkanRenderAPI::endFrame()
     }
 
     // End command buffer
+    endFrameTiming();
     vkEndCommandBuffer(command_buffers[current_frame]);
     frame_started = false;
 }

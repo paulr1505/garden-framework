@@ -160,6 +160,56 @@ bool VulkanRenderAPI::createLogicalDevice()
     return true;
 }
 
+bool VulkanRenderAPI::createFrameTimingResources()
+{
+    if (physical_device == VK_NULL_HANDLE || device == VK_NULL_HANDLE)
+        return false;
+
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(physical_device, &props);
+    m_frameTimingTimestampPeriod = props.limits.timestampPeriod;
+
+    uint32_t queue_family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, nullptr);
+    std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, queue_families.data());
+
+    if (graphics_queue_family >= queue_families.size() ||
+        queue_families[graphics_queue_family].timestampValidBits == 0 ||
+        m_frameTimingTimestampPeriod <= 0.0f)
+    {
+        LOG_ENGINE_WARN("[Vulkan] GPU timestamps unavailable; Performance Monitor GPU timing disabled");
+        return true;
+    }
+
+    VkQueryPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    pool_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    pool_info.queryCount = MAX_FRAMES_IN_FLIGHT * kFrameTimingQueriesPerFrame;
+
+    VkResult result = vkCreateQueryPool(device, &pool_info, nullptr, &m_frameTimingQueryPool);
+    if (result != VK_SUCCESS)
+    {
+        LOG_ENGINE_WARN("[Vulkan] Failed to create timestamp query pool; Performance Monitor GPU timing disabled");
+        m_frameTimingQueryPool = VK_NULL_HANDLE;
+        return true;
+    }
+
+    m_frameTimingSupported = true;
+    m_lastFrameStats.backend_name = getAPIName();
+    return true;
+}
+
+void VulkanRenderAPI::cleanupFrameTimingResources()
+{
+    if (m_frameTimingQueryPool != VK_NULL_HANDLE && device != VK_NULL_HANDLE)
+    {
+        vkDestroyQueryPool(device, m_frameTimingQueryPool, nullptr);
+        m_frameTimingQueryPool = VK_NULL_HANDLE;
+    }
+    m_frameTimingSupported = false;
+}
+
 bool VulkanRenderAPI::createVmaAllocator()
 {
     VmaVulkanFunctions vulkanFunctions = {};

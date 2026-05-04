@@ -20,6 +20,7 @@
 #include "panels/ViewportPanel.hpp"
 #include "panels/NavMeshPanel.hpp"
 #include "panels/PhysicsDebugPanel.hpp"
+#include "panels/PerformanceMonitorPanel.hpp"
 #include "panels/LODSettingsPanel.hpp"
 #include "panels/ModelPreviewPanel.hpp"
 #include "Assets/AssetScanner.hpp"
@@ -37,6 +38,7 @@
 #include "PIEProcessManager.hpp"
 #include "PIEClientInstance.hpp"
 #include "PrefabEditor/PrefabEditorManager.hpp"
+#include "EditorPerformanceMonitor.hpp"
 
 class EditorApp
 {
@@ -84,6 +86,7 @@ private:
     bool m_show_physics_debug  = false;
     bool m_show_model_preview  = true;
     bool m_show_plugin_manager = false;
+    bool m_show_performance_monitor = false;
 
     // Mouse state (editor camera)
     bool  m_right_mouse = false;
@@ -125,6 +128,8 @@ private:
     StatusBarPanel       m_status_bar;
     NavMeshPanel         m_navmesh_panel;
     PhysicsDebugPanel    m_physics_debug_panel;
+    PerformanceMonitorPanel m_performance_monitor_panel;
+    EditorPerformanceMonitor m_perf_monitor;
 
     // Asset management
     Assets::AssetScanner m_asset_scanner;

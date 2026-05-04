@@ -2,6 +2,7 @@
 #include "VulkanMesh.hpp"
 #include "Components/mesh.hpp"
 #include "Components/camera.hpp"
+#include "Console/ConVar.hpp"
 #include "Graphics/RenderCommandBuffer.hpp"
 #include "Utils/Log.hpp"
 #include <stdio.h>
@@ -40,6 +41,60 @@ bool checkIndexedDrawBounds(const char* tag,
         return false;
     }
     return true;
+}
+
+bool vec3Equal(const glm::vec3& a, const glm::vec3& b)
+{
+    return a.x == b.x && a.y == b.y && a.z == b.z;
+}
+
+bool isStaticInstancingEligible(const DrawCommand& cmd)
+{
+    return !cmd.pso_key.shadow
+        && !cmd.pso_key.depth_only
+        && cmd.pso_key.blend == BlendMode::None;
+}
+
+bool staticInstanceCompatible(const DrawCommand& a, const DrawCommand& b)
+{
+    return isStaticInstancingEligible(a)
+        && isStaticInstancingEligible(b)
+        && a.gpu_mesh == b.gpu_mesh
+        && a.use_texture == b.use_texture
+        && a.texture == b.texture
+        && a.pso_key == b.pso_key
+        && a.start_vertex == b.start_vertex
+        && a.vertex_count == b.vertex_count
+        && a.alpha_cutoff == b.alpha_cutoff
+        && a.metallic == b.metallic
+        && a.roughness == b.roughness
+        && vec3Equal(a.color, b.color)
+        && vec3Equal(a.emissive, b.emissive);
+}
+
+size_t estimateStaticInstanceSavings(const RenderCommandBuffer& cmds)
+{
+    size_t savedDraws = 0;
+    for (size_t i = 0; i < cmds.size();)
+    {
+        const DrawCommand& first = cmds[i];
+        if (!isStaticInstancingEligible(first)) {
+            ++i;
+            continue;
+        }
+
+        size_t runLength = 1;
+        while (i + runLength < cmds.size() &&
+               staticInstanceCompatible(first, cmds[i + runLength]))
+        {
+            ++runLength;
+        }
+
+        if (runLength > 1)
+            savedDraws += runLength - 1;
+        i += runLength;
+    }
+    return savedDraws;
 }
 } // namespace
 
@@ -679,6 +734,69 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
 // Command Buffer Replay (Multicore Rendering)
 // ============================================================================
 
+bool VulkanRenderAPI::shouldUseStaticInstancing(const RenderCommandBuffer& cmds) const
+{
+    if (!CVAR_BOOL(r_vulkan_static_instancing) || cmds.size() < 2)
+        return false;
+
+    return estimateStaticInstanceSavings(cmds) > 0;
+}
+
+bool VulkanRenderAPI::replayStaticInstancedBatch(VkCommandBuffer cmd, const RenderCommandBuffer& cmds,
+                                                 size_t start, size_t count,
+                                                 VulkanMesh* vulkanMesh, VkPipeline selectedPipeline,
+                                                 VkDescriptorSet ds, uint32_t perObjectDynamicOffset)
+{
+    if (count < 2 || !vulkanMesh)
+        return false;
+
+    const DrawCommand& drawCmd = cmds[start];
+
+    if (selectedPipeline != last_bound_pipeline) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
+        last_bound_pipeline = selectedPipeline;
+    }
+
+    if (ds != last_bound_descriptor_set || perObjectDynamicOffset != last_bound_dynamic_offset) {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipeline_layout, 0, 1, &ds, 1, &perObjectDynamicOffset);
+        last_bound_descriptor_set = ds;
+        last_bound_dynamic_offset = perObjectDynamicOffset;
+    }
+
+    VkBuffer vb = vulkanMesh->getVertexBuffer();
+    if (vb != last_bound_vertex_buffer) {
+        VkBuffer vertexBuffers[] = {vb};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+        last_bound_vertex_buffer = vb;
+    }
+
+    const uint32_t instanceCount = static_cast<uint32_t>(count);
+    if (vulkanMesh->isIndexed()) {
+        vkCmdBindIndexBuffer(cmd, vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
+        uint32_t indexCount = drawCmd.vertex_count > 0
+            ? static_cast<uint32_t>(drawCmd.vertex_count)
+            : static_cast<uint32_t>(vulkanMesh->getIndexCount());
+        uint32_t firstIndex = static_cast<uint32_t>(drawCmd.start_vertex);
+        if (drawCmd.vertex_count > 0 && !checkIndexedDrawBounds(
+                "replay-main-instanced", vulkanMesh, firstIndex, indexCount, "main_instanced_replay"))
+            return false;
+        vkCmdDrawIndexed(cmd, indexCount, instanceCount, firstIndex, 0, 0);
+    } else {
+        uint32_t vertexCount = drawCmd.vertex_count > 0
+            ? static_cast<uint32_t>(drawCmd.vertex_count)
+            : static_cast<uint32_t>(vulkanMesh->getVertexCount());
+        uint32_t firstVertex = static_cast<uint32_t>(drawCmd.start_vertex);
+        vkCmdDraw(cmd, vertexCount, instanceCount, firstVertex, 0);
+    }
+
+    m_lastFrameStats.backend_draw_calls++;
+    m_lastFrameStats.instanced_batches++;
+    m_lastFrameStats.instanced_instances += count;
+    return true;
+}
+
 void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 {
     if (cmds.empty() || !frame_started || device_lost) return;
@@ -709,8 +827,12 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 
     uploadLightUniformBuffer(current_frame);
 
-    for (const auto& drawCmd : cmds)
+    m_lastFrameStats.submitted_draw_commands += cmds.size();
+    const bool allowStaticInstancing = shouldUseStaticInstancing(cmds);
+
+    for (size_t cmdIndex = 0; cmdIndex < cmds.size(); ++cmdIndex)
     {
+        const auto& drawCmd = cmds[cmdIndex];
         if (!drawCmd.gpu_mesh || !drawCmd.gpu_mesh->isUploaded()) continue;
 
         VulkanMesh* vulkanMesh = dynamic_cast<VulkanMesh*>(drawCmd.gpu_mesh);
@@ -759,18 +881,24 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                 if (drawCmd.vertex_count > 0) {
                     if (checkIndexedDrawBounds("replay-shadow", vulkanMesh,
                                                drawCmd.start_vertex, drawCmd.vertex_count,
-                                               "shadow_replay"))
+                                               "shadow_replay")) {
                         vkCmdDrawIndexed(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
                                          static_cast<uint32_t>(drawCmd.start_vertex), 0, 0);
+                        m_lastFrameStats.backend_draw_calls++;
+                    }
                 } else {
                     vkCmdDrawIndexed(cmd, static_cast<uint32_t>(vulkanMesh->getIndexCount()), 1, 0, 0, 0);
+                    m_lastFrameStats.backend_draw_calls++;
                 }
             } else {
-                if (drawCmd.vertex_count > 0)
+                if (drawCmd.vertex_count > 0) {
                     vkCmdDraw(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
                               static_cast<uint32_t>(drawCmd.start_vertex), 0);
-                else
+                    m_lastFrameStats.backend_draw_calls++;
+                } else {
                     vkCmdDraw(cmd, static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
+                    m_lastFrameStats.backend_draw_calls++;
+                }
             }
             // Restore opaque shadow pipeline for next draw
             if (drawCmd.pso_key.alpha_test && shadow_pipeline_alpha_test != VK_NULL_HANDLE)
@@ -791,6 +919,38 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             last_bound_pipeline = selectedPipeline;
         }
 
+        size_t batchCount = 1;
+        if (allowStaticInstancing && isStaticInstancingEligible(drawCmd)) {
+            while (cmdIndex + batchCount < cmds.size() &&
+                   staticInstanceCompatible(drawCmd, cmds[cmdIndex + batchCount]))
+            {
+                ++batchCount;
+            }
+        }
+
+        bool useInstanceData = false;
+        uint32_t instanceBase = 0;
+        if (batchCount >= 2 &&
+            current_frame < instance_data_mapped.size() &&
+            instance_data_mapped[current_frame] != nullptr)
+        {
+            uint32_t base = instance_data_index[current_frame].fetch_add(
+                static_cast<uint32_t>(batchCount), std::memory_order_relaxed);
+            if (base + batchCount <= MAX_STATIC_INSTANCE_DRAWS) {
+                instanceBase = base;
+                useInstanceData = true;
+                VulkanInstanceData* instanceDst =
+                    static_cast<VulkanInstanceData*>(instance_data_mapped[current_frame]) + instanceBase;
+                for (size_t i = 0; i < batchCount; ++i) {
+                    const DrawCommand& instCmd = cmds[cmdIndex + i];
+                    instanceDst[i].model = instCmd.model_matrix;
+                    instanceDst[i].normalMatrix = instCmd.normal_matrix;
+                }
+            } else {
+                batchCount = 1;
+            }
+        }
+
         // Upload PerObjectUBO to dynamic ring buffer (atomic increment for multicore safety)
         uint32_t perObjectDynamicOffset;
         {
@@ -803,7 +963,7 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 
             PerObjectUBO objUbo{};
             objUbo.model = drawCmd.model_matrix;
-            objUbo.normalMatrix = glm::transpose(glm::inverse(drawCmd.model_matrix));
+            objUbo.normalMatrix = drawCmd.normal_matrix;
             objUbo.color = drawCmd.color;
             objUbo.useTexture = drawCmd.use_texture ? 1 : 0;
             objUbo.alphaCutoff = drawCmd.alpha_cutoff;
@@ -814,6 +974,8 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             objUbo.hasNormalMap = 0;
             objUbo.hasOcclusionMap = 0;
             objUbo.hasEmissiveMap = 0;
+            objUbo.useInstanceData = useInstanceData ? 1 : 0;
+            objUbo.instanceBase = instanceBase;
 
             void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
             memcpy(dst, &objUbo, sizeof(objUbo));
@@ -831,6 +993,18 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             last_bound_dynamic_offset = perObjectDynamicOffset;
         }
 
+        if (useInstanceData) {
+            if (replayStaticInstancedBatch(cmd, cmds, cmdIndex, batchCount,
+                                           vulkanMesh, selectedPipeline,
+                                           ds, perObjectDynamicOffset))
+            {
+                cmdIndex += batchCount - 1;
+                continue;
+            }
+            cmdIndex += batchCount - 1;
+            continue;
+        }
+
         // Bind vertex buffer and draw
         VkBuffer vb = vulkanMesh->getVertexBuffer();
         if (vb != last_bound_vertex_buffer) {
@@ -845,18 +1019,24 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             if (drawCmd.vertex_count > 0) {
                 if (checkIndexedDrawBounds("replay-main", vulkanMesh,
                                            drawCmd.start_vertex, drawCmd.vertex_count,
-                                           "main_replay"))
+                                           "main_replay")) {
                     vkCmdDrawIndexed(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
                                      static_cast<uint32_t>(drawCmd.start_vertex), 0, 0);
+                    m_lastFrameStats.backend_draw_calls++;
+                }
             } else {
                 vkCmdDrawIndexed(cmd, static_cast<uint32_t>(vulkanMesh->getIndexCount()), 1, 0, 0, 0);
+                m_lastFrameStats.backend_draw_calls++;
             }
         } else {
-            if (drawCmd.vertex_count > 0)
+            if (drawCmd.vertex_count > 0) {
                 vkCmdDraw(cmd, static_cast<uint32_t>(drawCmd.vertex_count), 1,
                           static_cast<uint32_t>(drawCmd.start_vertex), 0);
-            else
+                m_lastFrameStats.backend_draw_calls++;
+            } else {
                 vkCmdDraw(cmd, static_cast<uint32_t>(vulkanMesh->getVertexCount()), 1, 0, 0);
+                m_lastFrameStats.backend_draw_calls++;
+            }
         }
     }
 }
@@ -874,6 +1054,14 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
     if (cmds.size() < VK_PARALLEL_REPLAY_THRESHOLD ||
         m_threadCommandPools.empty() ||
         continuation_render_pass == VK_NULL_HANDLE)
+    {
+        replayCommandBuffer(cmds);
+        return;
+    }
+
+    constexpr size_t STATIC_INSTANCING_PARALLEL_SAVINGS_THRESHOLD = VK_PARALLEL_REPLAY_THRESHOLD / 16;
+    if (CVAR_BOOL(r_vulkan_static_instancing) &&
+        estimateStaticInstanceSavings(cmds) >= STATIC_INSTANCING_PARALLEL_SAVINGS_THRESHOLD)
     {
         replayCommandBuffer(cmds);
         return;
@@ -980,6 +1168,8 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
         return;
     }
 
+    m_lastFrameStats.submitted_draw_commands += cmds.size();
+
     // 6. Prepare secondary command buffer inheritance info
     VkCommandBufferInheritanceInfo inheritanceInfo{};
     inheritanceInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
@@ -1066,7 +1256,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
 
                     PerObjectUBO objUbo{};
                     objUbo.model = drawCmd.model_matrix;
-                    objUbo.normalMatrix = glm::transpose(glm::inverse(drawCmd.model_matrix));
+                    objUbo.normalMatrix = drawCmd.normal_matrix;
                     objUbo.color = drawCmd.color;
                     objUbo.useTexture = drawCmd.use_texture ? 1 : 0;
                     objUbo.alphaCutoff = drawCmd.alpha_cutoff;
@@ -1138,6 +1328,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
         secondaryBuffers.push_back(workers[w].pool->secondary_buffer[frameIdx]);
 
     vkCmdExecuteCommands(cmd, static_cast<uint32_t>(secondaryBuffers.size()), secondaryBuffers.data());
+    m_lastFrameStats.backend_draw_calls += cmds.size();
 
     // 11. End secondary render pass
     vkCmdEndRenderPass(cmd);

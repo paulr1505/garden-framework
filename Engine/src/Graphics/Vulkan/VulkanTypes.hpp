@@ -120,6 +120,14 @@ struct PerObjectUBO {
     int hasNormalMap;
     int hasOcclusionMap;
     int hasEmissiveMap;
+    int useInstanceData;
+    uint32_t instanceBase;
+    glm::vec2 _instancePad;
+};
+
+struct VulkanInstanceData {
+    glm::mat4 model;
+    glm::mat4 normalMatrix;
 };
 
 // Shadow UBO for shadow pass (matches Slang shader ShadowCB)

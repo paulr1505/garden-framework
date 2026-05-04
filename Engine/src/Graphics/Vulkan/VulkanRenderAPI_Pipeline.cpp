@@ -104,10 +104,18 @@ bool VulkanRenderAPI::createDescriptorSetLayout()
     spotLightsBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     spotLightsBinding.pImmutableSamplers = nullptr;
 
-    std::array<VkDescriptorSetLayoutBinding, 11> bindings = {
+    // Binding 12: static instance data used by Vulkan replay batching.
+    VkDescriptorSetLayoutBinding instanceDataBinding{};
+    instanceDataBinding.binding = 12;
+    instanceDataBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    instanceDataBinding.descriptorCount = 1;
+    instanceDataBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    instanceDataBinding.pImmutableSamplers = nullptr;
+
+    std::array<VkDescriptorSetLayoutBinding, 12> bindings = {
         uboLayoutBinding, samplerLayoutBinding, shadowMapBinding, lightUboBinding, perObjectUboBinding,
         metallicRoughnessBinding, normalMapBinding, occlusionBinding, emissiveBinding,
-        pointLightsBinding, spotLightsBinding
+        pointLightsBinding, spotLightsBinding, instanceDataBinding
     };
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};

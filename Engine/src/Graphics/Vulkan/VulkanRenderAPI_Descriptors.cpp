@@ -14,7 +14,7 @@
 bool VulkanRenderAPI::createDescriptorPool()
 {
     // Create a small dedicated pool for per-frame global descriptor sets
-    // Each set needs 3 UBOs (GlobalUBO, LightUBO, PerObjectUBO) and 6 samplers (diffuse, shadow, + 4 PBR)
+    // Each set needs UBOs, samplers, light SSBOs, and the instance-data SSBO.
     uint32_t globalSets = MAX_FRAMES_IN_FLIGHT;
 
     std::array<VkDescriptorPoolSize, 4> globalPoolSizes{};
@@ -25,7 +25,7 @@ bool VulkanRenderAPI::createDescriptorPool()
     globalPoolSizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     globalPoolSizes[2].descriptorCount = globalSets * 1; // PerObjectUBO (dynamic)
     globalPoolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    globalPoolSizes[3].descriptorCount = globalSets * 2; // pointLights + spotLights SSBOs
+    globalPoolSizes[3].descriptorCount = globalSets * 3; // pointLights + spotLights + instance data
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -58,7 +58,7 @@ VkDescriptorPool VulkanRenderAPI::createPerDrawDescriptorPool()
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     poolSizes[2].descriptorCount = SETS_PER_POOL * 1; // PerObjectUBO (dynamic)
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[3].descriptorCount = SETS_PER_POOL * 2; // pointLights + spotLights SSBOs
+    poolSizes[3].descriptorCount = SETS_PER_POOL * 3; // pointLights + spotLights + instance data
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -263,6 +263,36 @@ bool VulkanRenderAPI::createUniformBuffers()
         }
     }
 
+    // Static instance data SSBOs (binding 12). These are populated by Vulkan
+    // command replay when compatible opaque draws are collapsed into one
+    // instanced draw call.
+    {
+        const VkDeviceSize bufferSize = sizeof(VulkanInstanceData) * MAX_STATIC_INSTANCE_DRAWS;
+        instance_data_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+        instance_data_allocations.resize(MAX_FRAMES_IN_FLIGHT);
+        instance_data_mapped.resize(MAX_FRAMES_IN_FLIGHT);
+
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = bufferSize;
+            bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+            VmaAllocationCreateInfo allocInfo{};
+            allocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+            allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+            VmaAllocationInfo allocInfoOut{};
+            if (vmaCreateBuffer(vma_allocator, &bufferInfo, &allocInfo,
+                               &instance_data_buffers[i], &instance_data_allocations[i], &allocInfoOut) != VK_SUCCESS) {
+                printf("Failed to create Vulkan instance data buffer %d\n", i);
+                return false;
+            }
+            instance_data_mapped[i] = allocInfoOut.pMappedData;
+            instance_data_index[i] = 0;
+        }
+    }
+
     return true;
 }
 
@@ -314,12 +344,20 @@ bool VulkanRenderAPI::createDescriptorSets()
         spotLightsInfo.offset = 0;
         spotLightsInfo.range = VK_WHOLE_SIZE;
 
+        VkDescriptorBufferInfo instanceDataInfo{};
+        instanceDataInfo.buffer = (i < static_cast<int>(instance_data_buffers.size()) &&
+                                   instance_data_buffers[i] != VK_NULL_HANDLE)
+            ? instance_data_buffers[i] : m_dummy_lights_buffer;
+        instanceDataInfo.offset = 0;
+        instanceDataInfo.range = VK_WHOLE_SIZE;
+
         VkDescriptorWriter(descriptor_sets[i])
             .writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &globalBufferInfo)
             .writeBuffer(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &lightBufferInfo)
             .writeBuffer(4, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, &perObjectBufferInfo)
             .writeBuffer(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &pointLightsInfo)
             .writeBuffer(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &spotLightsInfo)
+            .writeBuffer(12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &instanceDataInfo)
             .update(device);
     }
 
@@ -451,6 +489,13 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
     spotLightsInfo.offset = 0;
     spotLightsInfo.range = VK_WHOLE_SIZE;
 
+    VkDescriptorBufferInfo instanceDataInfo{};
+    instanceDataInfo.buffer = (frameIndex < instance_data_buffers.size() &&
+                               instance_data_buffers[frameIndex] != VK_NULL_HANDLE)
+        ? instance_data_buffers[frameIndex] : m_dummy_lights_buffer;
+    instanceDataInfo.offset = 0;
+    instanceDataInfo.range = VK_WHOLE_SIZE;
+
     VkDescriptorWriter(ds)
         .writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &globalBufferInfo)
         .writeImage(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo)
@@ -463,6 +508,7 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
         .writeImage(9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &emissiveInfo)
         .writeBuffer(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &pointLightsInfo)
         .writeBuffer(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &spotLightsInfo)
+        .writeBuffer(12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &instanceDataInfo)
         .update(device);
 }
 

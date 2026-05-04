@@ -1,5 +1,6 @@
 #include "VulkanRenderAPI.hpp"
 #include "VulkanMesh.hpp"
+#include "Console/ConVar.hpp"
 #include "Utils/EnginePaths.hpp"
 #include "Utils/Log.hpp"
 #include <stdio.h>
@@ -33,6 +34,8 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
     viewport_width = width;
     viewport_height = height;
     field_of_view = fov;
+    if (auto* cvar = CVAR_PTR(r_vsync))
+        m_vsyncEnabled = cvar->getBool();
 
     // Create Vulkan instance
     LOG_ENGINE_INFO("[Vulkan] Initializing Vulkan backend...");
@@ -57,6 +60,10 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
     if (!createLogicalDevice()) {
         printf("Failed to create logical device\n");
         return false;
+    }
+
+    if (!createFrameTimingResources()) {
+        LOG_ENGINE_WARN("[Vulkan] Failed to initialize frame timing resources");
     }
 
     // Create VMA allocator
@@ -281,6 +288,8 @@ void VulkanRenderAPI::shutdown()
     // Clean up PIE viewport resources
     destroyAllPIEViewports();
 
+    cleanupFrameTimingResources();
+
     // Clean up viewport resources
     destroyViewportResources();
     if (viewport_resolve_pass != VK_NULL_HANDLE) {
@@ -410,6 +419,16 @@ void VulkanRenderAPI::shutdown()
     per_object_uniform_buffers.clear();
     per_object_uniform_allocations.clear();
     per_object_uniform_mapped.clear();
+
+    // Clean up static instance data buffers
+    for (size_t i = 0; i < instance_data_buffers.size(); i++) {
+        if (instance_data_buffers[i] && vma_allocator) {
+            vmaDestroyBuffer(vma_allocator, instance_data_buffers[i], instance_data_allocations[i]);
+        }
+    }
+    instance_data_buffers.clear();
+    instance_data_allocations.clear();
+    instance_data_mapped.clear();
 
     // Clean up descriptor pools
     if (global_descriptor_pool != VK_NULL_HANDLE) {

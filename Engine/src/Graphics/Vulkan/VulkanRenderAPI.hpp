@@ -101,8 +101,11 @@ public:
     virtual void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
 
     virtual const char* getAPIName() const override { return "Vulkan"; }
+    RenderFrameStats getLastFrameStats() const override;
 
     // Graphics settings
+    virtual void setVSyncEnabled(bool enabled) override;
+    virtual bool isVSyncEnabled() const override;
     virtual void setFXAAEnabled(bool enabled) override;
     virtual bool isFXAAEnabled() const override;
     virtual void setShadowQuality(int quality) override;
@@ -154,6 +157,11 @@ private:
     bool createCommandPool();
     bool createCommandBuffers();
     bool createSyncObjects();
+    bool createFrameTimingResources();
+    void cleanupFrameTimingResources();
+    void consumeFrameTiming(uint32_t frameIndex);
+    void beginFrameTiming();
+    void endFrameTiming();
     bool ensureRenderFinishedSemaphores();
     bool createDescriptorSetLayout();
     bool createGraphicsPipeline();
@@ -220,6 +228,11 @@ private:
     VkDescriptorPool createPerDrawDescriptorPool();
     VkDescriptorSet allocateFromPerDrawPool(uint32_t frameIndex);
     void initializeDescriptorSet(VkDescriptorSet ds, uint32_t frameIndex, TextureHandle texture);
+    bool shouldUseStaticInstancing(const RenderCommandBuffer& cmds) const;
+    bool replayStaticInstancedBatch(VkCommandBuffer cmd, const RenderCommandBuffer& cmds,
+                                    size_t start, size_t count,
+                                    VulkanMesh* vulkanMesh, VkPipeline selectedPipeline,
+                                    VkDescriptorSet ds, uint32_t perObjectDynamicOffset);
 
     // Parallel replay helpers (declarations that don't reference PerThreadCommandPool)
     bool createContinuationRenderPass();
@@ -248,6 +261,8 @@ private:
     VkExtent2D swapchain_extent = {0, 0};
     std::vector<VkImage> swapchain_images;
     std::vector<VkImageView> swapchain_image_views;
+    bool m_vsyncEnabled = true;
+    bool m_vsyncDirty = false;
 
     // Depth buffer
     VkImage depth_image = VK_NULL_HANDLE;
@@ -341,6 +356,15 @@ private:
     std::vector<VkFence> in_flight_fences;
     uint32_t current_frame = 0;
     uint32_t current_image_index = 0;
+
+    static constexpr uint32_t kFrameTimingQueriesPerFrame = 2;
+    VkQueryPool m_frameTimingQueryPool = VK_NULL_HANDLE;
+    float m_frameTimingTimestampPeriod = 0.0f;
+    bool m_frameTimingSupported = false;
+    bool m_frameTimingActive[MAX_FRAMES_IN_FLIGHT] = {};
+    bool m_frameTimingPendingReadback[MAX_FRAMES_IN_FLIGHT] = {};
+    uint64_t m_completedTimingFrame = 0;
+    RenderFrameStats m_lastFrameStats{};
 
     // VMA allocator
     VmaAllocator vma_allocator = nullptr;
@@ -475,6 +499,12 @@ private:
     std::vector<VmaAllocation> per_object_uniform_allocations;
     std::vector<void*> per_object_uniform_mapped;
     std::atomic<uint32_t> per_object_draw_index[2] = {0, 0}; // per-frame draw counter (atomic for multicore)
+
+    static constexpr uint32_t MAX_STATIC_INSTANCE_DRAWS = MAX_PER_OBJECT_DRAWS;
+    std::vector<VkBuffer> instance_data_buffers;
+    std::vector<VmaAllocation> instance_data_allocations;
+    std::vector<void*> instance_data_mapped;
+    std::atomic<uint32_t> instance_data_index[2] = {0, 0};
 
     // Matrix stack (CPU-side)
     glm::mat4 projection_matrix = glm::mat4(1.0f);

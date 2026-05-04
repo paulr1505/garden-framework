@@ -15,6 +15,15 @@
 #include <filesystem>
 #include <algorithm>
 
+namespace
+{
+    void markPrefabPreviewDirty(PrefabEditorInstance& inst)
+    {
+        inst.unsaved_changes = true;
+        inst.preview_dirty = true;
+    }
+}
+
 // ── Initialization ──────────────────────────────────────────────────────────
 
 void PrefabEditorManager::initialize(IRenderAPI* render_api, ReflectionRegistry* reflection)
@@ -93,6 +102,8 @@ void PrefabEditorManager::loadPrefabIntoInstance(PrefabEditorInstance& inst)
             inst.orbit.frameAABB(mc->m_mesh->aabb_min, mc->m_mesh->aabb_max, glm::radians(75.0f));
         }
     }
+
+    inst.preview_dirty = true;
 }
 
 // ── Save prefab from instance ───────────────────────────────────────────────
@@ -122,12 +133,22 @@ void PrefabEditorManager::renderAllPreviews()
     {
         if (!inst->is_open || inst->entity == entt::null)
             continue;
+        if (!inst->viewport_visible)
+            continue;
+        if (inst->viewport_width <= 0 || inst->viewport_height <= 0)
+            continue;
 
         auto* mc = inst->registry.try_get<MeshComponent>(inst->entity);
         if (!mc || !mc->m_mesh || !mc->m_mesh->gpu_mesh)
             continue;
 
         if (!m_render_api || !inst->viewport)
+            continue;
+
+        const bool size_changed =
+            inst->rendered_viewport_width != inst->viewport_width ||
+            inst->rendered_viewport_height != inst->viewport_height;
+        if (!inst->preview_dirty && !inst->preview_interacting && !size_changed)
             continue;
 
         if (inst->viewport_width > 0 && inst->viewport_height > 0)
@@ -155,6 +176,10 @@ void PrefabEditorManager::renderAllPreviews()
         renderer::render_mesh_with_api(*mc->m_mesh, identity, m_render_api);
 
         m_render_api->endSceneRender();
+
+        inst->preview_dirty = false;
+        inst->rendered_viewport_width = inst->viewport_width;
+        inst->rendered_viewport_height = inst->viewport_height;
     }
 }
 
@@ -192,7 +217,7 @@ void PrefabEditorManager::drawEditorWindow(PrefabEditorInstance& inst)
     ImGuiWindowFlags flags = ImGuiWindowFlags_MenuBar;
 
     bool window_open = inst.is_open;
-    ImGui::Begin(display_title.c_str(), &window_open, flags);
+    bool window_visible = ImGui::Begin(display_title.c_str(), &window_open, flags);
 
     // Handle close
     if (!window_open)
@@ -208,6 +233,15 @@ void PrefabEditorManager::drawEditorWindow(PrefabEditorInstance& inst)
             ImGui::End();
             return;
         }
+    }
+
+    if (!window_visible || ImGui::IsWindowCollapsed())
+    {
+        inst.viewport_visible = false;
+        if (inst.show_save_prompt)
+            drawSavePrompt(inst);
+        ImGui::End();
+        return;
     }
 
     // Save prompt modal (drawn inside this window, always visible)
@@ -387,7 +421,7 @@ void PrefabEditorManager::drawComponentsPanel(PrefabEditorInstance& inst)
             if (ImGui::MenuItem("Mesh"))
             {
                 inst.registry.emplace<MeshComponent>(inst.entity);
-                inst.unsaved_changes = true;
+                markPrefabPreviewDirty(inst);
             }
         }
 
@@ -396,7 +430,7 @@ void PrefabEditorManager::drawComponentsPanel(PrefabEditorInstance& inst)
             if (ImGui::MenuItem("Collider"))
             {
                 inst.registry.emplace<ColliderComponent>(inst.entity);
-                inst.unsaved_changes = true;
+                markPrefabPreviewDirty(inst);
             }
         }
 
@@ -415,7 +449,7 @@ void PrefabEditorManager::drawComponentsPanel(PrefabEditorInstance& inst)
                 if (ImGui::MenuItem(desc.display_name))
                 {
                     desc.add(inst.registry, inst.entity);
-                    inst.unsaved_changes = true;
+                    markPrefabPreviewDirty(inst);
                 }
             }
         }
@@ -472,12 +506,12 @@ void PrefabEditorManager::drawDetailsPanel(PrefabEditorInstance& inst)
             {
                 ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
 
-                if (ImGui::Checkbox("Visible", &mc.m_mesh->visible)) inst.unsaved_changes = true;
+                if (ImGui::Checkbox("Visible", &mc.m_mesh->visible)) markPrefabPreviewDirty(inst);
                 ImGui::SameLine();
-                if (ImGui::Checkbox("Transparent", &mc.m_mesh->transparent)) inst.unsaved_changes = true;
-                if (ImGui::Checkbox("Casts Shadow", &mc.m_mesh->casts_shadow)) inst.unsaved_changes = true;
+                if (ImGui::Checkbox("Transparent", &mc.m_mesh->transparent)) markPrefabPreviewDirty(inst);
+                if (ImGui::Checkbox("Casts Shadow", &mc.m_mesh->casts_shadow)) markPrefabPreviewDirty(inst);
                 ImGui::SameLine();
-                if (ImGui::Checkbox("Culling", &mc.m_mesh->culling)) inst.unsaved_changes = true;
+                if (ImGui::Checkbox("Culling", &mc.m_mesh->culling)) markPrefabPreviewDirty(inst);
 
                 if (mc.m_mesh->getLODCount() > 1)
                 {
@@ -496,13 +530,13 @@ void PrefabEditorManager::drawDetailsPanel(PrefabEditorInstance& inst)
                     if (ImGui::BeginCombo("Force LOD", preview))
                     {
                         if (ImGui::Selectable("Auto", mc.m_mesh->force_lod == -1))
-                        { mc.m_mesh->force_lod = -1; inst.unsaved_changes = true; }
+                        { mc.m_mesh->force_lod = -1; markPrefabPreviewDirty(inst); }
                         for (int i = 0; i <= max_lod; ++i)
                         {
                             char label[16];
                             snprintf(label, sizeof(label), "LOD %d", i);
                             if (ImGui::Selectable(label, mc.m_mesh->force_lod == i))
-                            { mc.m_mesh->force_lod = i; inst.unsaved_changes = true; }
+                            { mc.m_mesh->force_lod = i; markPrefabPreviewDirty(inst); }
                         }
                         ImGui::EndCombo();
                     }
@@ -545,7 +579,7 @@ void PrefabEditorManager::drawDetailsPanel(PrefabEditorInstance& inst)
             auto& col = inst.registry.get<ColliderComponent>(inst.entity);
             ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.65f);
             if (drawColliderUI(col))
-                inst.unsaved_changes = true;
+                markPrefabPreviewDirty(inst);
             ImGui::PopItemWidth();
         }
         else
@@ -573,7 +607,7 @@ void PrefabEditorManager::drawDetailsPanel(PrefabEditorInstance& inst)
 
                 bool edit_started = false;
                 if (drawReflectedComponent(*desc, comp, &edit_started))
-                    inst.unsaved_changes = true;
+                    markPrefabPreviewDirty(inst);
 
                 ImGui::PopItemWidth();
             }
@@ -592,13 +626,19 @@ void PrefabEditorManager::drawDetailsPanel(PrefabEditorInstance& inst)
 
 void PrefabEditorManager::drawViewport(PrefabEditorInstance& inst)
 {
+    inst.viewport_visible = false;
+    inst.preview_interacting = false;
+
     ImVec2 avail = ImGui::GetContentRegionAvail();
     int new_w = static_cast<int>(avail.x);
     int new_h = static_cast<int>(avail.y);
     if (new_w > 0 && new_h > 0)
     {
+        if (inst.viewport_width != new_w || inst.viewport_height != new_h)
+            inst.preview_dirty = true;
         inst.viewport_width = new_w;
         inst.viewport_height = new_h;
+        inst.viewport_visible = true;
     }
 
     if (inst.viewport)
@@ -616,6 +656,8 @@ void PrefabEditorManager::drawViewport(PrefabEditorInstance& inst)
                     ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
                     ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
                     inst.orbit.orbit(delta.x, delta.y);
+                    inst.preview_dirty = true;
+                    inst.preview_interacting = true;
                 }
 
                 // Middle-drag: pan
@@ -633,12 +675,18 @@ void PrefabEditorManager::drawViewport(PrefabEditorInstance& inst)
 
                     inst.orbit.target -= right * delta.x * pan_speed;
                     inst.orbit.target += up * delta.y * pan_speed;
+                    inst.preview_dirty = true;
+                    inst.preview_interacting = true;
                 }
 
                 // Scroll: zoom
                 float scroll = ImGui::GetIO().MouseWheel;
                 if (scroll != 0.0f)
+                {
                     inst.orbit.zoom(scroll);
+                    inst.preview_dirty = true;
+                    inst.preview_interacting = true;
+                }
             }
         }
         else
@@ -662,7 +710,10 @@ void PrefabEditorManager::drawViewport(PrefabEditorInstance& inst)
         {
             auto* mc = inst.registry.try_get<MeshComponent>(inst.entity);
             if (mc && mc->m_mesh && mc->m_mesh->bounds_computed)
+            {
                 inst.orbit.frameAABB(mc->m_mesh->aabb_min, mc->m_mesh->aabb_max, glm::radians(75.0f));
+                inst.preview_dirty = true;
+            }
         }
         ImGui::PopStyleColor(2);
     }

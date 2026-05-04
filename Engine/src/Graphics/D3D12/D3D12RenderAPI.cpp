@@ -7,6 +7,7 @@
 #include "D3D12Mesh.hpp"
 #include "Components/mesh.hpp"
 #include "Components/camera.hpp"
+#include "Console/ConVar.hpp"
 #include "Utils/Log.hpp"
 #include "Utils/EnginePaths.hpp"
 #include "imgui.h"
@@ -182,6 +183,8 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
     viewport_width = width;
     viewport_height = height;
     field_of_view = fov;
+    if (auto* cvar = CVAR_PTR(r_vsync))
+        setVSyncEnabled(cvar->getBool());
 
     // Get native window handle from SDL
     SDL_PropertiesID props = SDL_GetWindowProperties(window);
@@ -236,6 +239,11 @@ bool D3D12RenderAPI::initialize(WindowHandle window, int width, int height, floa
     {
         LOG_ENGINE_ERROR("Failed to create fence");
         return false;
+    }
+
+    if (!createFrameTimingResources())
+    {
+        LOG_ENGINE_WARN("[D3D12] Failed to initialize frame timing resources");
     }
 
     if (!createUploadInfrastructure())
@@ -505,6 +513,9 @@ void D3D12RenderAPI::shutdown()
 
     m_copyQueue.shutdown();
     m_commandListPool.shutdown();
+    m_frameTimingReadback.Reset();
+    m_frameTimingQueryHeap.Reset();
+    m_frameTimingSupported = false;
 
     if (m_fenceEvent)
     {
@@ -549,6 +560,71 @@ void D3D12RenderAPI::flushGPU()
         m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent);
         WaitForSingleObject(m_fenceEvent, INFINITE);
     }
+}
+
+RenderFrameStats D3D12RenderAPI::getLastFrameStats() const
+{
+    RenderFrameStats stats = m_lastFrameStats;
+    stats.backend_name = getAPIName();
+    return stats;
+}
+
+void D3D12RenderAPI::consumeFrameTiming(UINT frameIndex)
+{
+    if (!m_frameTimingSupported || !m_frameTimingPendingReadback[frameIndex] || !m_frameTimingReadback)
+        return;
+
+    const UINT base_query = frameIndex * kFrameTimingQueriesPerFrame;
+    const SIZE_T byte_offset = sizeof(UINT64) * base_query;
+    D3D12_RANGE read_range = { byte_offset, byte_offset + sizeof(UINT64) * kFrameTimingQueriesPerFrame };
+    void* mapped = nullptr;
+    HRESULT hr = m_frameTimingReadback->Map(0, &read_range, &mapped);
+    if (SUCCEEDED(hr) && mapped)
+    {
+        const UINT64* values = reinterpret_cast<const UINT64*>(
+            static_cast<const uint8_t*>(mapped) + byte_offset);
+        const UINT64 start = values[0];
+        const UINT64 end = values[1];
+        if (end >= start && m_frameTimingFrequency > 0)
+        {
+            const double elapsed_ms = (static_cast<double>(end - start) * 1000.0) /
+                                      static_cast<double>(m_frameTimingFrequency);
+            m_lastFrameStats.backend_name = getAPIName();
+            m_lastFrameStats.gpu_frame_ms_valid = true;
+            m_lastFrameStats.gpu_frame_ms = static_cast<float>(elapsed_ms);
+            m_lastFrameStats.completed_gpu_frame = ++m_completedTimingFrame;
+        }
+        D3D12_RANGE write_range = { 0, 0 };
+        m_frameTimingReadback->Unmap(0, &write_range);
+    }
+
+    m_frameTimingPendingReadback[frameIndex] = false;
+}
+
+void D3D12RenderAPI::beginFrameTiming()
+{
+    if (!m_frameTimingSupported || !m_frameTimingQueryHeap || !commandList)
+        return;
+
+    const UINT base_query = m_frameIndex * kFrameTimingQueriesPerFrame;
+    commandList->EndQuery(m_frameTimingQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, base_query);
+    m_frameTimingActive[m_frameIndex] = true;
+    m_frameTimingPendingReadback[m_frameIndex] = false;
+}
+
+void D3D12RenderAPI::endFrameTimingAndResolve()
+{
+    if (!m_frameTimingSupported || !m_frameTimingActive[m_frameIndex] ||
+        !m_frameTimingQueryHeap || !m_frameTimingReadback || !commandList)
+        return;
+
+    const UINT base_query = m_frameIndex * kFrameTimingQueriesPerFrame;
+    commandList->EndQuery(m_frameTimingQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, base_query + 1);
+    commandList->ResolveQueryData(m_frameTimingQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                                  base_query, kFrameTimingQueriesPerFrame,
+                                  m_frameTimingReadback.Get(), sizeof(UINT64) * base_query);
+    m_frameTimingActive[m_frameIndex] = false;
+    m_frameTimingPendingReadback[m_frameIndex] = true;
 }
 
 void D3D12RenderAPI::waitForFence(UINT64 fenceValue)
@@ -679,6 +755,7 @@ void D3D12RenderAPI::ensureCommandListOpen()
 
     FrameContext& fc = m_frameContexts[m_frameIndex];
     waitForFence(fc.fenceValue);
+    consumeFrameTiming(m_frameIndex);
 
     // Now that the fence has retired the frame we're about to reuse, advance
     // the deferred-release ring. After kDeferredReleaseSlots advances, any
@@ -741,6 +818,7 @@ void D3D12RenderAPI::ensureCommandListOpen()
     m_copyQueue.applyPendingTransitions(commandList.Get());
 
     m_commandListOpen = true;
+    beginFrameTiming();
 }
 
 void D3D12RenderAPI::transitionResource(ID3D12Resource* resource,

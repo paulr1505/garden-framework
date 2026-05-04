@@ -17,6 +17,7 @@ bool D3D12RenderAPI::createSwapChain()
     scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     scd.BufferCount = NUM_BACK_BUFFERS;
     scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    scd.Flags = m_tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
 
     ComPtr<IDXGISwapChain1> swapChain1;
     HRESULT hr = dxgiFactory->CreateSwapChainForHwnd(
@@ -40,4 +41,15 @@ bool D3D12RenderAPI::createSwapChain()
 
     m_backBufferIndex = swapChain->GetCurrentBackBufferIndex();
     return true;
+}
+
+void D3D12RenderAPI::setVSyncEnabled(bool enabled)
+{
+    m_vsyncEnabled = enabled;
+    presentInterval = enabled ? 1 : 0;
+}
+
+bool D3D12RenderAPI::isVSyncEnabled() const
+{
+    return m_vsyncEnabled;
 }

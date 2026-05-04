@@ -64,6 +64,20 @@ bool D3D12RenderAPI::createDevice()
         return false;
     }
 
+    m_tearingSupported = false;
+    ComPtr<IDXGIFactory5> factory5;
+    if (SUCCEEDED(dxgiFactory.As(&factory5)))
+    {
+        BOOL allowTearing = FALSE;
+        if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                                                    &allowTearing, sizeof(allowTearing))))
+        {
+            m_tearingSupported = allowTearing == TRUE;
+        }
+    }
+    LOG_ENGINE_INFO("[D3D12] Variable refresh / tearing support: {}",
+                    m_tearingSupported ? "yes" : "no");
+
     // Find hardware adapter
     ComPtr<IDXGIAdapter1> adapter;
     for (UINT i = 0; dxgiFactory->EnumAdapters1(i, adapter.GetAddressOf()) != DXGI_ERROR_NOT_FOUND; i++)
@@ -288,6 +302,61 @@ bool D3D12RenderAPI::createFence()
     if (!m_fenceEvent) return false;
 
     m_fenceValue = 0;
+    return true;
+}
+
+bool D3D12RenderAPI::createFrameTimingResources()
+{
+    if (!device || !commandQueue)
+        return false;
+
+    UINT64 frequency = 0;
+    HRESULT hr = commandQueue->GetTimestampFrequency(&frequency);
+    if (FAILED(hr) || frequency == 0)
+    {
+        LOG_ENGINE_WARN("[D3D12] GPU timestamp frequency unavailable; Performance Monitor GPU timing disabled");
+        return true;
+    }
+
+    const UINT query_count = NUM_FRAMES_IN_FLIGHT * kFrameTimingQueriesPerFrame;
+
+    D3D12_QUERY_HEAP_DESC query_desc = {};
+    query_desc.Count = query_count;
+    query_desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    hr = device->CreateQueryHeap(&query_desc, IID_PPV_ARGS(m_frameTimingQueryHeap.GetAddressOf()));
+    if (FAILED(hr))
+    {
+        LOG_ENGINE_WARN("[D3D12] Failed to create timestamp query heap; Performance Monitor GPU timing disabled");
+        return true;
+    }
+    SetD3D12DebugName(m_frameTimingQueryHeap.Get(), L"Frame Timing Query Heap");
+
+    D3D12_HEAP_PROPERTIES heap_props = {};
+    heap_props.Type = D3D12_HEAP_TYPE_READBACK;
+
+    D3D12_RESOURCE_DESC buffer_desc = {};
+    buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer_desc.Width = sizeof(UINT64) * query_count;
+    buffer_desc.Height = 1;
+    buffer_desc.DepthOrArraySize = 1;
+    buffer_desc.MipLevels = 1;
+    buffer_desc.SampleDesc.Count = 1;
+    buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    hr = device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+                                         D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                         IID_PPV_ARGS(m_frameTimingReadback.GetAddressOf()));
+    if (FAILED(hr))
+    {
+        LOG_ENGINE_WARN("[D3D12] Failed to create timestamp readback buffer; Performance Monitor GPU timing disabled");
+        m_frameTimingQueryHeap.Reset();
+        return true;
+    }
+    SetD3D12DebugName(m_frameTimingReadback.Get(), L"Frame Timing Readback");
+
+    m_frameTimingFrequency = frequency;
+    m_frameTimingSupported = true;
+    m_lastFrameStats.backend_name = getAPIName();
     return true;
 }
 

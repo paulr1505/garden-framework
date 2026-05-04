@@ -36,6 +36,11 @@ cbuffer PerObjectCB : register(b1)
     int uHasNormalMap;
     int uHasOcclusionMap;
     int uHasEmissiveMap;
+#ifdef TARGET_SPIRV
+    int uUseInstanceData;
+    uint uInstanceBase;
+    float2 _instancePad;
+#endif
 };
 
 [[vk::binding(3, 0)]]
@@ -50,6 +55,15 @@ cbuffer LightCB : register(b3)
 
 [[vk::binding(10, 0)]]StructuredBuffer<PointLightData> pointLights : register(t6);
 [[vk::binding(11, 0)]]StructuredBuffer<SpotLightData>  spotLights  : register(t7);
+
+#ifdef TARGET_SPIRV
+struct InstanceData
+{
+    float4x4 model;
+    float4x4 normalMatrix;
+};
+[[vk::binding(12, 0)]]StructuredBuffer<InstanceData> instanceData : register(t8);
+#endif
 
 // Base color / diffuse texture
 [[vk::binding(1, 0)]]Texture2D diffuseTexture : register(t0);
@@ -181,14 +195,32 @@ float ShadowCalculation(int cascadeIndex, float3 fragPos, float3 normal, float v
 }
 
 [shader("vertex")]
+#ifdef TARGET_SPIRV
+PSInput vertexMain(VSInput input, uint instanceId : SV_InstanceID)
+#else
 PSInput vertexMain(VSInput input)
+#endif
 {
     PSInput output;
 
-    float4 worldPos = mul(uModel, float4(input.position, 1.0));
+#ifdef TARGET_SPIRV
+    float4x4 model = uModel;
+    float4x4 normalMatrix = uNormalMatrix;
+    if (uUseInstanceData != 0)
+    {
+        InstanceData inst = instanceData[uInstanceBase + instanceId];
+        model = inst.model;
+        normalMatrix = inst.normalMatrix;
+    }
+#else
+    float4x4 model = uModel;
+    float4x4 normalMatrix = uNormalMatrix;
+#endif
+
+    float4 worldPos = mul(model, float4(input.position, 1.0));
     output.fragPos = worldPos.xyz;
 
-    float3x3 normalMat = (float3x3)uNormalMatrix;
+    float3x3 normalMat = (float3x3)normalMatrix;
     output.normal = normalize(mul(normalMat, input.normal));
     output.tangent = normalize(mul(normalMat, input.tangent.xyz));
     output.bitangent = cross(output.normal, output.tangent) * input.tangent.w;

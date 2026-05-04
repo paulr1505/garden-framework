@@ -220,6 +220,7 @@ void D3D12RenderAPI::endFrame()
 
     // Close and execute command list
     flushBarriers();
+    endFrameTimingAndResolve();
     commandList->Close();
     m_commandListOpen = false;
     ID3D12CommandList* lists[] = { commandList.Get() };
@@ -238,13 +239,22 @@ void D3D12RenderAPI::present()
         transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_PRESENT);
 
         flushBarriers();
+        endFrameTimingAndResolve();
         commandList->Close();
         m_commandListOpen = false;
         ID3D12CommandList* lists[] = { commandList.Get() };
         commandQueue->ExecuteCommandLists(1, lists);
     }
 
-    HRESULT hr = swapChain->Present(presentInterval, 0);
+    UINT presentFlags = 0;
+    if (!m_vsyncEnabled && m_tearingSupported)
+    {
+        BOOL fullscreen = FALSE;
+        if (FAILED(swapChain->GetFullscreenState(&fullscreen, nullptr)) || fullscreen == FALSE)
+            presentFlags |= DXGI_PRESENT_ALLOW_TEARING;
+    }
+
+    HRESULT hr = swapChain->Present(presentInterval, presentFlags);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
     {
         HRESULT reason = device->GetDeviceRemovedReason();

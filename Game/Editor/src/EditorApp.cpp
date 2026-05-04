@@ -324,6 +324,7 @@ bool EditorApp::initialize(RenderAPIType api_type)
         render_api->setEditorViewport(m_main_viewport.get());
 
     // Apply graphics CVars from config.cfg
+    render_api->setVSyncEnabled(CVAR_BOOL(r_vsync));
     render_api->setFXAAEnabled(CVAR_BOOL(r_fxaa));
     render_api->setSSAOEnabled(CVAR_BOOL(r_ssao));
     render_api->setShadowQuality(CVAR_INT(r_shadowquality));
@@ -741,6 +742,7 @@ void EditorApp::run()
         // On non-Metal backends this is a no-op passthrough.
         m_app.getRenderAPI()->executeWithAutoreleasePool([&]() {
         Uint64 frame_start_ns = SDL_GetTicksNS();
+        m_perf_monitor.beginFrame();
         Uint64 now = SDL_GetTicks();
         m_delta_time = (now - last_ticks) / 1000.0f;
         last_ticks = now;
@@ -754,38 +756,41 @@ void EditorApp::run()
         processEvents();
 
         // --- Simulation tick (when active and running) ---
-        if (m_state.isSimulationRunning())
         {
-            if (m_network_pie_active)
+            EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuSimulation);
+            if (m_state.isSimulationRunning())
             {
-                // Network PIE: tick server (if listen server), then all clients
-                if (m_state.network_pie.net_mode == PIENetMode::ListenServer)
-                    m_game_module.serverUpdate(m_delta_time);
-
-                // Tick Player 1 (main editor viewport)
-                m_game_module.update(m_delta_time);
-                m_renderer.markBVHDirty();
-
-                // Tick additional in-editor PIE clients
-                for (auto& inst : m_pie_clients)
+                if (m_network_pie_active)
                 {
-                    if (inst && inst->initialized)
-                        inst->game_module.update(m_delta_time);
-                }
-            }
-            else if (m_game_sim)
-            {
-                // Standalone: existing GameSimulation path
-                if (m_mouse_captured_for_game && m_game_input_manager)
-                {
-                    float mx = m_game_input_manager->get_mouse_delta_x();
-                    float my = m_game_input_manager->get_mouse_delta_y();
-                    if (mx != 0.0f || my != 0.0f)
-                        m_game_sim->handleMouseMotion(my, mx);
-                }
+                    // Network PIE: tick server (if listen server), then all clients
+                    if (m_state.network_pie.net_mode == PIENetMode::ListenServer)
+                        m_game_module.serverUpdate(m_delta_time);
 
-                m_game_sim->update(m_delta_time);
-                m_renderer.markBVHDirty();
+                    // Tick Player 1 (main editor viewport)
+                    m_game_module.update(m_delta_time);
+                    m_renderer.markBVHDirty();
+
+                    // Tick additional in-editor PIE clients
+                    for (auto& inst : m_pie_clients)
+                    {
+                        if (inst && inst->initialized)
+                            inst->game_module.update(m_delta_time);
+                    }
+                }
+                else if (m_game_sim)
+                {
+                    // Standalone: existing GameSimulation path
+                    if (m_mouse_captured_for_game && m_game_input_manager)
+                    {
+                        float mx = m_game_input_manager->get_mouse_delta_x();
+                        float my = m_game_input_manager->get_mouse_delta_y();
+                        if (mx != 0.0f || my != 0.0f)
+                            m_game_sim->handleMouseMotion(my, mx);
+                    }
+
+                    m_game_sim->update(m_delta_time);
+                    m_renderer.markBVHDirty();
+                }
             }
         }
 
@@ -818,23 +823,32 @@ void EditorApp::run()
         IRenderAPI* render_api = m_app.getRenderAPI();
         render_api->setEditorViewport(m_main_viewport.get());
         render_api->setViewportSize(m_viewport.width, m_viewport.height);
-        m_renderer.render_scene_to_texture(m_world.registry, render_camera);
+        const bool render_main_viewport =
+            m_show_viewport && m_viewport.is_visible && m_viewport.width > 0 && m_viewport.height > 0;
+        {
+            EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuViewport);
+            if (render_main_viewport)
+                m_renderer.render_scene_to_texture(m_world.registry, render_camera);
+        }
 
         // --- Phase 1b: Render additional PIE client viewports ---
-        for (auto& inst : m_pie_clients)
         {
-            if (!inst || !inst->initialized || !inst->viewport)
-                continue;
+            EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuPIEViewports);
+            for (auto& inst : m_pie_clients)
+            {
+                if (!inst || !inst->initialized || !inst->viewport)
+                    continue;
 
-            // Bind the PIE viewport as the active scene render target. resize()
-            // is a no-op if the size hasn't changed.
-            inst->viewport->resize(inst->viewport_width, inst->viewport_height);
-            render_api->setEditorViewport(inst->viewport.get());
-            render_api->setViewportSize(inst->viewport_width, inst->viewport_height);
+                // Bind the PIE viewport as the active scene render target. resize()
+                // is a no-op if the size hasn't changed.
+                inst->viewport->resize(inst->viewport_width, inst->viewport_height);
+                render_api->setEditorViewport(inst->viewport.get());
+                render_api->setViewportSize(inst->viewport_width, inst->viewport_height);
 
-            // Render the client's world using its camera
-            m_renderer.render_scene_to_texture(inst->client_world.registry,
-                                                inst->client_world.world_camera);
+                // Render the client's world using its camera
+                m_renderer.render_scene_to_texture(inst->client_world.registry,
+                                                    inst->client_world.world_camera);
+            }
         }
 
         // Restore main viewport binding + size for any post-PIE work that
@@ -846,11 +860,17 @@ void EditorApp::run()
         }
 
         // --- Phase 1c: Render prefab editor 3D previews ---
-        m_prefab_editor.renderAllPreviews();
+        {
+            EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuPrefabPreviews);
+            m_prefab_editor.renderAllPreviews();
+        }
 
         // Restore main viewport size after prefab editor rendering
         if (m_prefab_editor.hasOpenEditors())
+        {
+            render_api->setEditorViewport(m_main_viewport.get());
             render_api->setViewportSize(m_viewport.width, m_viewport.height);
+        }
 
         // Update editor state stats (after scene render so stats are current)
         m_state.fps = ImGui::GetIO().Framerate;
@@ -875,15 +895,17 @@ void EditorApp::run()
         }
 
         // --- Phase 2: Build ImGui UI ---
-        ImGuiManager::get().newFrame();
-        ImGuizmo::BeginFrame();
-        RmlUiManager::get().beginFrame();
-
-        renderDockspace();
-
-        if (m_show_ui)
         {
-            bool bvh_dirty = false;
+            EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuUIBuild);
+            ImGuiManager::get().newFrame();
+            ImGuizmo::BeginFrame();
+            RmlUiManager::get().beginFrame();
+
+            renderDockspace();
+
+            if (m_show_ui)
+            {
+                bool bvh_dirty = false;
 
             // Viewport panel with embedded toolbar, gizmo, and click-to-select
             if (m_show_viewport)
@@ -976,6 +998,9 @@ void EditorApp::run()
             if (m_show_physics_debug)
                 m_physics_debug_panel.draw(&m_show_physics_debug);
 
+            if (m_show_performance_monitor)
+                m_performance_monitor_panel.draw(m_perf_monitor, &m_show_performance_monitor);
+
             // LOD settings panel (opens when double-clicking a mesh in content browser)
             m_lod_settings_panel.draw();
 
@@ -1007,21 +1032,31 @@ void EditorApp::run()
             if (bvh_dirty)
                 m_renderer.markBVHDirty();
         }
+        }
 
         // Forward the frame delta to every loaded plugin (after UI so plugin
         // state changes are reflected next frame, same as first-party panels).
-        m_plugin_host.tick(m_delta_time);
+        {
+            EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuPluginTick);
+            m_plugin_host.tick(m_delta_time);
+        }
 
         // --- Phase 3: Render ImGui to screen ---
-        ImGui::Render();
-        render_api->renderUI();
+        {
+            EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuRenderUI);
+            ImGui::Render();
+            render_api->renderUI();
 
-        // Multi-viewport: update and render platform windows (second monitor support)
-        ImGuiManager::get().updatePlatformWindows();
+            // Multi-viewport: update and render platform windows (second monitor support)
+            ImGuiManager::get().updatePlatformWindows();
 
-        m_app.swapBuffers();
+            m_app.swapBuffers();
+        }
 
         Uint64 frame_end_ns = SDL_GetTicksNS();
+        m_perf_monitor.addSample(EditorPerfSeries::CpuFrame,
+                                 EditorPerformanceMonitor::nsToMs(frame_end_ns - frame_start_ns));
+        m_perf_monitor.endFrame(render_api->getLastFrameStats());
         applyEditorFpsCap(m_app);
         m_app.lockFramerate(frame_start_ns, frame_end_ns);
         }); // executeWithAutoreleasePool
@@ -2255,6 +2290,12 @@ void EditorApp::renderMenuBar()
             ImGui::EndMenu();
         }
 
+        if (ImGui::BeginMenu("Debug"))
+        {
+            ImGui::MenuItem("Performance Monitor", nullptr, &m_show_performance_monitor);
+            ImGui::EndMenu();
+        }
+
         if (ImGui::BeginMenu("Settings"))
         {
             if (ImGui::MenuItem("Editor Settings..."))
@@ -2402,6 +2443,17 @@ void EditorApp::renderEditorSettings()
             case SettingsCategory::Rendering:
             {
                 ImGui::SeparatorText("Rendering Features");
+
+                // VSync toggle
+                {
+                    auto* cvar = CVAR_PTR(r_vsync);
+                    bool vsync = cvar ? cvar->getBool() : true;
+                    if (ImGui::Checkbox("VSync", &vsync))
+                    {
+                        if (cvar) cvar->setInt(vsync ? 1 : 0);
+                        m_app.getRenderAPI()->setVSyncEnabled(vsync);
+                    }
+                }
 
                 // FXAA toggle
                 {
@@ -2579,7 +2631,7 @@ void EditorApp::renderEditorSettings()
             const char* cvar_names[] = { "r_fxaa", "r_ssao", "r_shadowquality", "r_shadowcascades", "r_sky", "r_lighting",
                                           "r_dynamiclights", "r_depthprepass", "r_frustumculling",
                                           "r_staticmesh_chunking", "r_staticmesh_chunk_tris",
-                                          "r_staticmesh_max_chunks", "r_deferred" };
+                                          "r_staticmesh_max_chunks", "r_deferred", "r_vsync" };
             for (const char* name : cvar_names)
             {
                 if (auto* cv = ConVarRegistry::get().find(name))
@@ -2590,6 +2642,7 @@ void EditorApp::renderEditorSettings()
             m_app.getRenderAPI()->setShadowQuality(CVAR_INT(r_shadowquality));
             m_app.getRenderAPI()->setShadowCascadeCount(CVAR_INT(r_shadowcascades));
             m_app.getRenderAPI()->setDeferredEnabled(CVAR_BOOL(r_deferred));
+            m_app.getRenderAPI()->setVSyncEnabled(CVAR_BOOL(r_vsync));
             m_app.getRenderAPI()->enableLighting(CVAR_BOOL(r_lighting));
             m_renderer.setDepthPrepassEnabled(CVAR_BOOL(r_depthprepass));
             m_renderer.setBVHEnabled(CVAR_BOOL(r_frustumculling));

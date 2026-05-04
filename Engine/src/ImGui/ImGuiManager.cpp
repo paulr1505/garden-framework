@@ -459,6 +459,14 @@ void ImGuiManager::render()
         {
             if (ImGui::CollapsingHeader("Graphics", ImGuiTreeNodeFlags_DefaultOpen))
             {
+                bool vsync = m_renderAPI->isVSyncEnabled();
+                if (ImGui::Checkbox("VSync", &vsync))
+                {
+                    m_renderAPI->setVSyncEnabled(vsync);
+                    if (auto* cvar = CVAR_PTR(r_vsync))
+                        cvar->setInt(vsync ? 1 : 0);
+                }
+
                 // FXAA toggle
                 bool fxaa = m_renderAPI->isFXAAEnabled();
                 if (ImGui::Checkbox("FXAA", &fxaa))

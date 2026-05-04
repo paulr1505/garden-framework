@@ -238,6 +238,7 @@ int main(int argc, char* argv[])
     }
 
     LOG_ENGINE_TRACE("Game initialized with {} render API", render_api->getAPIName());
+    render_api->setVSyncEnabled(CVAR_BOOL(r_vsync));
 
     if (!ImGuiManager::get().initialize(app.getWindow(), render_api, api_type))
     {

@@ -1105,6 +1105,7 @@ public:
         render_api->setShadowQuality(CVAR_INT(r_shadowquality));
         render_api->setShadowCascadeCount(CVAR_INT(r_shadowcascades));
         render_api->setDeferredEnabled(CVAR_BOOL(r_deferred));
+        render_api->setVSyncEnabled(CVAR_BOOL(r_vsync));
         render_api->enableLighting(global_lighting);
 
         last_draw_calls = 0;
@@ -1368,6 +1369,7 @@ public:
         render_api->setShadowQuality(CVAR_INT(r_shadowquality));
         render_api->setShadowCascadeCount(CVAR_INT(r_shadowcascades));
         render_api->setDeferredEnabled(CVAR_BOOL(r_deferred));
+        render_api->setVSyncEnabled(CVAR_BOOL(r_vsync));
         render_api->enableLighting(global_lighting);
 
         last_draw_calls = 0;

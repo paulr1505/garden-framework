@@ -18,6 +18,7 @@
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
+#include <dxgi1_5.h>
 #include <dxgidebug.h>
 #include <wrl/client.h>
 #include <SDL3/SDL.h>
@@ -293,7 +294,19 @@ private:
     int  pp_resize_height = 0;
 
     // VSync / present interval
+    bool m_vsyncEnabled = true;
+    bool m_tearingSupported = false;
     int presentInterval = 1;
+
+    static constexpr UINT kFrameTimingQueriesPerFrame = 2;
+    ComPtr<ID3D12QueryHeap> m_frameTimingQueryHeap;
+    ComPtr<ID3D12Resource> m_frameTimingReadback;
+    UINT64 m_frameTimingFrequency = 0;
+    bool m_frameTimingSupported = false;
+    bool m_frameTimingActive[NUM_FRAMES_IN_FLIGHT] = {};
+    bool m_frameTimingPendingReadback[NUM_FRAMES_IN_FLIGHT] = {};
+    uint64_t m_completedTimingFrame = 0;
+    RenderFrameStats m_lastFrameStats{};
 
     // Internal helper methods
     bool createDevice();
@@ -303,6 +316,10 @@ private:
     bool createBackBufferRTVs();
     bool createFrameResources();
     bool createFence();
+    bool createFrameTimingResources();
+    void consumeFrameTiming(UINT frameIndex);
+    void beginFrameTiming();
+    void endFrameTimingAndResolve();
     bool createUploadInfrastructure();
     bool createRootSignature();
     bool loadShaders();
@@ -485,8 +502,11 @@ public:
     void renderDebugLinesDirect(const vertex* vertices, size_t vertex_count);
 
     const char* getAPIName() const override { return "D3D12"; }
+    RenderFrameStats getLastFrameStats() const override;
 
     // Graphics settings
+    void setVSyncEnabled(bool enabled) override;
+    bool isVSyncEnabled() const override;
     void setFXAAEnabled(bool enabled) override;
     bool isFXAAEnabled() const override;
     void setShadowQuality(int quality) override;

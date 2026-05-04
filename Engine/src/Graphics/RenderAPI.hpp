@@ -70,6 +70,18 @@ struct RenderState
     float alpha_cutoff = 0.0f;
 };
 
+struct RenderFrameStats
+{
+    const char* backend_name = "Unknown";
+    bool gpu_frame_ms_valid = false;
+    float gpu_frame_ms = 0.0f;
+    uint64_t completed_gpu_frame = 0;
+    uint64_t submitted_draw_commands = 0;
+    uint64_t backend_draw_calls = 0;
+    uint64_t instanced_batches = 0;
+    uint64_t instanced_instances = 0;
+};
+
 // GPU light structures for point/spot light constant buffers.
 // MAX_LIGHTS is the forward-path CB cap. The deferred path uses a larger
 // StructuredBuffer (see MAX_LIGHTS_DEFERRED on backends like D3D12RenderAPI).
@@ -209,8 +221,16 @@ public:
 
     // Utility
     virtual const char* getAPIName() const = 0;
+    virtual RenderFrameStats getLastFrameStats() const
+    {
+        RenderFrameStats stats;
+        stats.backend_name = getAPIName();
+        return stats;
+    }
 
     // Graphics settings
+    virtual void setVSyncEnabled(bool enabled) { (void)enabled; }
+    virtual bool isVSyncEnabled() const { return true; }
     virtual void setFXAAEnabled(bool enabled) = 0;
     virtual bool isFXAAEnabled() const = 0;
     virtual void setShadowQuality(int quality) = 0;  // 0=Off, 1=Low(1024), 2=Medium(2048), 3=High(4096)

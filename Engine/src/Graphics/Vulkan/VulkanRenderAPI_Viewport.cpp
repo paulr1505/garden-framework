@@ -711,6 +711,8 @@ uint64_t VulkanRenderAPI::getViewportTextureID()
 void VulkanRenderAPI::renderUI()
 {
     if (!isViewportMode()) return;
+    if (!frame_started)
+        prepareFrame();
     if (!frame_started || !image_acquired) return;
 
     VkCommandBuffer cmd = command_buffers[current_frame];
@@ -750,6 +752,7 @@ void VulkanRenderAPI::renderUI()
     }
 
     vkCmdEndRenderPass(cmd);
+    endFrameTiming();
     vkEndCommandBuffer(cmd);
     frame_started = false;
 }

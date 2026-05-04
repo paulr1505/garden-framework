@@ -25,11 +25,35 @@ cbuffer PerObjectCB : register(b1)
     float3 uColor;
     int uUseTexture;
     float uAlphaCutoff;
+#ifdef TARGET_SPIRV
+    float uMetallic;
+    float uRoughness;
+    float _pbrPad1;
+    float3 uEmissive;
+    float _pbrPad2;
+    int uHasMetallicRoughnessMap;
+    int uHasNormalMap;
+    int uHasOcclusionMap;
+    int uHasEmissiveMap;
+    int uUseInstanceData;
+    uint uInstanceBase;
+    float2 _instancePad;
+#else
     float3 _objPad;
+#endif
 };
 
 [[vk::binding(1, 0)]]Texture2D diffuseTexture : register(t0);
 [[vk::binding(1, 0)]]SamplerState linearSampler : register(s0);
+
+#ifdef TARGET_SPIRV
+struct InstanceData
+{
+    float4x4 model;
+    float4x4 normalMatrix;
+};
+[[vk::binding(12, 0)]]StructuredBuffer<InstanceData> instanceData : register(t8);
+#endif
 
 struct VSInput
 {
@@ -45,11 +69,25 @@ struct PSInput
 };
 
 [shader("vertex")]
+#ifdef TARGET_SPIRV
+PSInput vertexMain(VSInput input, uint instanceId : SV_InstanceID)
+#else
 PSInput vertexMain(VSInput input)
+#endif
 {
     PSInput output;
 
-    float4 worldPos = mul(uModel, float4(input.position, 1.0));
+#ifdef TARGET_SPIRV
+    float4x4 model = uModel;
+    if (uUseInstanceData != 0)
+    {
+        model = instanceData[uInstanceBase + instanceId].model;
+    }
+#else
+    float4x4 model = uModel;
+#endif
+
+    float4 worldPos = mul(model, float4(input.position, 1.0));
     float4 viewPos = mul(uView, worldPos);
     output.position = mul(uProjection, viewPos);
     output.texcoord = input.texcoord;

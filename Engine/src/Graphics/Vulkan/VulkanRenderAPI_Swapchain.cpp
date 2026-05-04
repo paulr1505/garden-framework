@@ -16,16 +16,45 @@
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
 
+namespace
+{
+    const char* presentModeName(VkPresentModeKHR mode)
+    {
+        switch (mode)
+        {
+        case VK_PRESENT_MODE_IMMEDIATE_KHR: return "IMMEDIATE";
+        case VK_PRESENT_MODE_MAILBOX_KHR: return "MAILBOX";
+        case VK_PRESENT_MODE_FIFO_KHR: return "FIFO";
+        case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "FIFO_RELAXED";
+        default: return "UNKNOWN";
+        }
+    }
+}
+
 bool VulkanRenderAPI::createSwapchain()
 {
     vkb::SwapchainBuilder swapchain_builder{ physical_device, device, surface };
 
-    auto swap_ret = swapchain_builder
+    swapchain_builder
         .set_desired_format({ VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR })
-        .set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
-        .set_desired_extent(viewport_width, viewport_height)
-        .add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR)
-        .build();
+        .set_desired_extent(viewport_width, viewport_height);
+
+    if (m_vsyncEnabled)
+    {
+        swapchain_builder
+            .set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
+            .add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR);
+    }
+    else
+    {
+        swapchain_builder
+            .set_desired_present_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)
+            .add_fallback_present_mode(VK_PRESENT_MODE_FIFO_RELAXED_KHR)
+            .add_fallback_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
+            .add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR);
+    }
+
+    auto swap_ret = swapchain_builder.build();
 
     if (!swap_ret) {
         printf("Failed to create swapchain: %s\n", swap_ret.error().message().c_str());
@@ -38,9 +67,25 @@ bool VulkanRenderAPI::createSwapchain()
     swapchain_extent = vkb_swapchain.extent;
     swapchain_images = vkb_swapchain.get_images().value();
 
-    printf("Swapchain created: %dx%d, %zu images\n",
-           swapchain_extent.width, swapchain_extent.height, swapchain_images.size());
+    printf("Swapchain created: %dx%d, %zu images, present=%s\n",
+           swapchain_extent.width, swapchain_extent.height, swapchain_images.size(),
+           presentModeName(vkb_swapchain.present_mode));
     return true;
+}
+
+void VulkanRenderAPI::setVSyncEnabled(bool enabled)
+{
+    if (m_vsyncEnabled == enabled)
+        return;
+
+    m_vsyncEnabled = enabled;
+    if (swapchain != VK_NULL_HANDLE)
+        m_vsyncDirty = true;
+}
+
+bool VulkanRenderAPI::isVSyncEnabled() const
+{
+    return m_vsyncEnabled;
 }
 
 bool VulkanRenderAPI::createImageViews()

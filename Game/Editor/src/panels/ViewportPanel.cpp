@@ -17,10 +17,17 @@ GizmoResult ViewportPanel::draw(ImTextureID scene_texture, EditorState& state,
 {
     GizmoResult result;
     is_hovered = false;
+    is_visible = false;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::Begin("Viewport", p_open);
+    bool window_visible = ImGui::Begin("Viewport", p_open);
     PanelMaximizeButton();
+    if (!window_visible || ImGui::IsWindowCollapsed())
+    {
+        ImGui::End();
+        ImGui::PopStyleVar();
+        return result;
+    }
 
     // --- Toolbar strip (inside the viewport window) ---
     if (toolbar && show_toolbar && *show_toolbar)
@@ -52,6 +59,7 @@ GizmoResult ViewportPanel::draw(ImTextureID scene_texture, EditorState& state,
     {
         width = new_w;
         height = new_h;
+        is_visible = true;
     }
 
     PlayMode play_mode = state.play_mode;

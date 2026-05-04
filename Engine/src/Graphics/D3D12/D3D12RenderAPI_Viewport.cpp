@@ -196,6 +196,8 @@ void D3D12RenderAPI::renderUI()
 {
     if (device_lost) return;
 
+    ensureCommandListOpen();
+
     // Transition back buffer to render target
     transitionResource(m_backBuffers[m_backBufferIndex].Get(), {}, D3D12_RESOURCE_STATE_RENDER_TARGET);
 

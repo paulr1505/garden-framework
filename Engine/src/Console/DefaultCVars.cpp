@@ -19,6 +19,9 @@ CONVAR(sv_cheats, 0, ConVarFlags::SERVER_ONLY | ConVarFlags::REPLICATED | ConVar
        "Allow cheats on this server (0=disabled, 1=enabled)");
 
 // Graphics cvars (client-side, saved to config)
+CONVAR(r_vsync, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable vertical sync (0=off, 1=on)");
+
 CONVAR(r_fxaa, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Enable FXAA anti-aliasing");
 
@@ -70,6 +73,9 @@ static constexpr int kDefaultVulkanValidation = 0;
 #endif
 CONVAR(r_vulkan_validation, kDefaultVulkanValidation, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Enable Vulkan validation layers and debug callback. Costs performance; takes effect on next launch.");
+
+CONVAR(r_vulkan_static_instancing, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable Vulkan static instancing for compatible opaque mesh draws");
 
 CONVAR_BOUNDED(fps_max, 60, 0, 1000, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
                "Maximum frame rate (0=unlimited)");
