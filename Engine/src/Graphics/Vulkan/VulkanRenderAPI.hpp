@@ -553,7 +553,7 @@ private:
     glm::vec3 clear_color = glm::vec3(0.2f, 0.3f, 0.8f);
 
     // CSM shadow mapping
-    static const int NUM_CASCADES = 4;
+    static constexpr int NUM_CASCADES = 4;
     uint32_t currentShadowSize = 4096;  // Runtime configurable shadow resolution
     int shadowQuality = 3;  // 0=Off, 1=Low(1024), 2=Medium(2048), 3=High(4096)
     int pendingShadowQuality = -1;  // Deferred quality change (-1 = none pending)

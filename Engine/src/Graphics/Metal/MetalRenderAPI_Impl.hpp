@@ -8,6 +8,8 @@
 #include "Utils/Log.hpp"
 #include <atomic>
 
+class MetalSceneViewport;
+
 // ============================================================================
 // Implementation struct (Pimpl) — shared by all MetalRenderAPI_*.mm files
 // ============================================================================
@@ -118,6 +120,7 @@ struct MetalRenderAPIImpl {
     std::unordered_map<int, PIEViewportTarget> pieViewports;
     int nextPIEId = 0;
     int activeSceneTarget = -1; // -1 = main viewport
+    MetalSceneViewport* editorSceneViewport = nullptr; // Non-owning SceneViewport binding.
 
     // Shadow mapping
     static constexpr int NUM_CASCADES = 4;

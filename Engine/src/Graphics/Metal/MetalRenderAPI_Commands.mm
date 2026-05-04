@@ -1,5 +1,6 @@
 #include "MetalRenderAPI.hpp"
 #include "MetalRenderAPI_Impl.hpp"
+#include "MetalSceneViewport.hpp"
 #include "MetalMesh.hpp"
 #include "Components/mesh.hpp"
 #include "Components/camera.hpp"
@@ -355,11 +356,14 @@ static uint64_t replayCommandRange(MetalRenderAPIImpl* impl,
 
 static MTLRenderPassDescriptor* buildLoadPassDescriptor(MetalRenderAPIImpl* impl)
 {
-    bool editorMode = (impl->viewportTexture != nil);
+    bool editorMode = (impl->viewportTexture != nil || impl->editorSceneViewport != nullptr);
     bool pieMode = false;
     MetalRenderAPIImpl::PIEViewportTarget* pieTarget = nullptr;
-    if (impl->activeSceneTarget >= 0) {
-        auto it = impl->pieViewports.find(impl->activeSceneTarget);
+    int sceneTarget = impl->activeSceneTarget;
+    if (sceneTarget < 0 && impl->editorSceneViewport)
+        sceneTarget = impl->editorSceneViewport->pieId();
+    if (sceneTarget >= 0) {
+        auto it = impl->pieViewports.find(sceneTarget);
         if (it != impl->pieViewports.end() && it->second.colorTexture) {
             pieMode = true;
             pieTarget = &it->second;
@@ -422,11 +426,14 @@ void MetalRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     }
 
     // Determine render target dimensions
-    bool editorMode = (impl->viewportTexture != nil);
+    bool editorMode = (impl->viewportTexture != nil || impl->editorSceneViewport != nullptr);
     bool pieMode = false;
     MetalRenderAPIImpl::PIEViewportTarget* pieTarget = nullptr;
-    if (impl->activeSceneTarget >= 0) {
-        auto it = impl->pieViewports.find(impl->activeSceneTarget);
+    int sceneTarget = impl->activeSceneTarget;
+    if (sceneTarget < 0 && impl->editorSceneViewport)
+        sceneTarget = impl->editorSceneViewport->pieId();
+    if (sceneTarget >= 0) {
+        auto it = impl->pieViewports.find(sceneTarget);
         if (it != impl->pieViewports.end() && it->second.colorTexture) {
             pieMode = true;
             pieTarget = &it->second;

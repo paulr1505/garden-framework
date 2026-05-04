@@ -1,5 +1,6 @@
 #include "MetalRenderAPI.hpp"
 #include "MetalRenderAPI_Impl.hpp"
+#include "MetalSceneViewport.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_metal.h"
@@ -44,7 +45,7 @@ void MetalRenderAPI::beginFrame()
     // Process deferred deletions (safe after semaphore wait in ensureCommandBuffer)
     impl->deletionQueue.flush();
 
-    bool editorMode = (impl->viewportTexture != nil);
+    bool editorMode = (impl->viewportTexture != nil || impl->editorSceneViewport != nullptr);
 
     // In editor mode, defer drawable acquisition to renderUI
     if (!editorMode) {
@@ -70,8 +71,11 @@ void MetalRenderAPI::beginFrame()
     // Check if rendering to a PIE viewport
     bool pieMode = false;
     MetalRenderAPIImpl::PIEViewportTarget* pieTarget = nullptr;
-    if (impl->activeSceneTarget >= 0) {
-        auto it = impl->pieViewports.find(impl->activeSceneTarget);
+    int sceneTarget = impl->activeSceneTarget;
+    if (sceneTarget < 0 && impl->editorSceneViewport)
+        sceneTarget = impl->editorSceneViewport->pieId();
+    if (sceneTarget >= 0) {
+        auto it = impl->pieViewports.find(sceneTarget);
         if (it != impl->pieViewports.end() && it->second.colorTexture) {
             pieMode = true;
             pieTarget = &it->second;
@@ -186,7 +190,7 @@ void MetalRenderAPI::endFrame()
     if (!impl->frameStarted) return;
 
     // In editor mode, endSceneRender + renderUI handle finalization
-    if (impl->viewportTexture) return;
+    if (impl->viewportTexture || impl->editorSceneViewport || impl->activeSceneTarget >= 0) return;
 
     // End main render encoder
     if (impl->mainPassActive && impl->encoder) {

@@ -105,6 +105,8 @@ public:
     virtual uint64_t getViewportTextureID() override;
     virtual void setViewportSize(int width, int height) override;
     virtual void renderUI() override;
+    virtual std::unique_ptr<SceneViewport> createSceneViewport(int width, int height) override;
+    virtual void setEditorViewport(SceneViewport* viewport) override;
 
     // Preview render target (for asset preview panel)
     virtual void beginPreviewFrame(int width, int height) override;

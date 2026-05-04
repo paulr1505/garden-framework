@@ -70,6 +70,7 @@ sources = {
     src/Graphics/Metal/MetalRenderAPI_SSAO.mm [macOS]
     src/Graphics/Metal/MetalMesh.mm [macOS]
     src/Graphics/Metal/MetalRenderAPI_Commands.mm [macOS]
+    src/Graphics/Metal/MetalSceneViewport.mm [macOS]
     src/Graphics/stb_impl.cpp
     src/ImGui/ImGuiManager.cpp
     src/UI/RmlUiManager.cpp
@@ -104,6 +105,7 @@ if(macOS)
     libs = ${Vulkan_LIBRARIES}, -framework Metal, -framework QuartzCore, -framework Cocoa
     libdirs = ${Vulkan_LIBRARY_DIRS}
     objcflags = -fobjc-arc
+    ldflags = -Xlinker -install_name -Xlinker @loader_path/EngineGraphics.dylib
 }
 target_link_libraries(
     PUBLIC EngineCore

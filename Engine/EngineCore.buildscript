@@ -33,6 +33,10 @@ headers = src/**/*.h, src/**/*.hpp
 includes = src, thirdparty/include
 public_includes = src, thirdparty/include, .
 defines = JPH_OBJECT_STREAM, ENGINECORE_BUILDING_DLL
+if(macOS)
+{
+    ldflags = -Xlinker -install_name -Xlinker @loader_path/EngineCore.dylib
+}
 target_link_libraries(
     PUBLIC SDL3
     PUBLIC GLM

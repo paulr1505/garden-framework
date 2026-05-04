@@ -1,5 +1,6 @@
 #include "MetalRenderAPI.hpp"
 #include "MetalRenderAPI_Impl.hpp"
+#include "MetalSceneViewport.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_metal.h"
@@ -105,6 +106,18 @@ void MetalRenderAPIImpl::createPIEViewportTextures(PIEViewportTarget& target, in
 void MetalRenderAPI::setViewportSize(int width, int height)
 {
     if (width <= 0 || height <= 0) return;
+
+    if (impl->editorSceneViewport)
+    {
+        impl->editorSceneViewport->resize(width, height);
+        impl->viewportWidthRT = width;
+        impl->viewportHeightRT = height;
+
+        float ratio = (float)width / (float)height;
+        impl->projectionMatrix = glm::perspectiveRH_ZO(glm::radians(impl->fieldOfView), ratio, 0.1f, 1000.0f);
+        return;
+    }
+
     if (width == impl->viewportWidthRT && height == impl->viewportHeightRT) return;
 
     impl->createViewportResources(width, height);
@@ -121,10 +134,14 @@ void MetalRenderAPI::setViewportSize(int width, int height)
 
 void MetalRenderAPI::endSceneRender()
 {
-    // Check if we are rendering to a PIE viewport
-    if (impl->activeSceneTarget >= 0)
+    int sceneTarget = impl->activeSceneTarget;
+    if (sceneTarget < 0 && impl->editorSceneViewport)
+        sceneTarget = impl->editorSceneViewport->pieId();
+
+    // Check if we are rendering to a PIE/editor SceneViewport target.
+    if (sceneTarget >= 0)
     {
-        auto it = impl->pieViewports.find(impl->activeSceneTarget);
+        auto it = impl->pieViewports.find(sceneTarget);
         if (it != impl->pieViewports.end())
         {
             auto& pie = it->second;
@@ -182,7 +199,7 @@ void MetalRenderAPI::endSceneRender()
             // If FXAA is disabled, scene was rendered directly to PIE colorTexture — nothing to do
         }
 
-        // Reset active scene target back to main viewport
+        // Reset explicit scene target back to the currently bound editor viewport.
         impl->activeSceneTarget = -1;
 
         // Reset bind tracking
@@ -253,6 +270,8 @@ void MetalRenderAPI::endSceneRender()
 
 uint64_t MetalRenderAPI::getViewportTextureID()
 {
+    if (impl->editorSceneViewport)
+        return impl->editorSceneViewport->getOutputTextureID();
     if (!impl->viewportTexture) return 0;
     return (uint64_t)((__bridge void*)impl->viewportTexture);
 }
@@ -383,12 +402,15 @@ void MetalRenderAPI::destroyPIEViewport(int id)
     // If we just destroyed the active target, reset to main viewport
     if (impl->activeSceneTarget == id)
         impl->activeSceneTarget = -1;
+    if (impl->editorSceneViewport && impl->editorSceneViewport->pieId() == id)
+        impl->editorSceneViewport = nullptr;
 }
 
 void MetalRenderAPI::destroyAllPIEViewports()
 {
     impl->pieViewports.clear();
     impl->activeSceneTarget = -1;
+    impl->editorSceneViewport = nullptr;
 }
 
 void MetalRenderAPI::setPIEViewportSize(int id, int width, int height)
@@ -415,13 +437,30 @@ uint64_t MetalRenderAPI::getPIEViewportTextureID(int id)
     return (uint64_t)((__bridge void*)it->second.colorTexture);
 }
 
+std::unique_ptr<SceneViewport> MetalRenderAPI::createSceneViewport(int width, int height)
+{
+    if (width <= 0 || height <= 0) return nullptr;
+
+    auto viewport = std::make_unique<MetalSceneViewport>(this, width, height);
+    if (viewport->pieId() < 0)
+        return nullptr;
+    return viewport;
+}
+
+void MetalRenderAPI::setEditorViewport(SceneViewport* viewport)
+{
+    auto* metalViewport = static_cast<MetalSceneViewport*>(viewport);
+    impl->editorSceneViewport = metalViewport;
+    impl->activeSceneTarget = metalViewport ? metalViewport->pieId() : -1;
+}
+
 // ============================================================================
 // UI Rendering (editor mode)
 // ============================================================================
 
 void MetalRenderAPI::renderUI()
 {
-    if (!impl->viewportTexture) return;  // Not in editor mode
+    if (!impl->viewportTexture && !impl->editorSceneViewport) return;  // Not in editor mode
     if (!impl->commandBuffer) return;
 
     // Acquire drawable now (deferred from beginFrame/endShadowPass)
