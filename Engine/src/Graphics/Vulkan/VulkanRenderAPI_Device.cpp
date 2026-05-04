@@ -1,4 +1,5 @@
 #include "VulkanRenderAPI.hpp"
+#include "Console/ConVar.hpp"
 #include "Utils/Log.hpp"
 #include <stdio.h>
 
@@ -49,18 +50,23 @@ bool VulkanRenderAPI::createInstance()
     }
 #endif
 
-    vkb::InstanceBuilder builder;
+    const bool enableValidation = CVAR_BOOL(r_vulkan_validation);
 
-    auto inst_ret = builder
+    vkb::InstanceBuilder builder;
+    builder
         .set_app_name("Garden Engine")
         .set_engine_name("Garden Engine")
         .require_api_version(1, 2, 0)
 #ifdef __APPLE__
         .enable_extension(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
 #endif
-        .request_validation_layers(true)
-        .set_debug_callback(vulkanDebugCallback)
-        .build();
+        .request_validation_layers(enableValidation);
+
+    if (enableValidation) {
+        builder.set_debug_callback(vulkanDebugCallback);
+    }
+
+    auto inst_ret = builder.build();
 
     if (!inst_ret) {
         printf("Failed to create Vulkan instance: %s\n", inst_ret.error().message().c_str());
@@ -72,6 +78,7 @@ bool VulkanRenderAPI::createInstance()
 
     debug_messenger = vkb_instance.debug_messenger;
 
+    LOG_ENGINE_INFO("[Vulkan] Validation layers {}", enableValidation ? "enabled" : "disabled");
     printf("Vulkan instance created\n");
     return true;
 }

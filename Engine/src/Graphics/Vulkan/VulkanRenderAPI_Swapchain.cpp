@@ -235,6 +235,9 @@ bool VulkanRenderAPI::ensureRenderFinishedSemaphores()
 
 void VulkanRenderAPI::cleanupSwapchain()
 {
+    m_ppGraphBuilder.clearCachedFramebuffers();
+    m_rgBackend.clearCachedResources();
+
     // Destroy framebuffers
     for (auto framebuffer : framebuffers) {
         vkDestroyFramebuffer(device, framebuffer, nullptr);

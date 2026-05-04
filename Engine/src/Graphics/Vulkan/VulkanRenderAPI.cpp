@@ -257,6 +257,9 @@ void VulkanRenderAPI::shutdown()
         vkDeviceWaitIdle(device);
     }
 
+    m_ppGraphBuilder.clearCachedFramebuffers();
+    m_rgBackend.clearCachedResources();
+
     // Flush all deferred deletions
     deletion_queue.flushAll();
 

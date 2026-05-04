@@ -63,6 +63,14 @@ CONVAR(r_d3d12_dred, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Force-enable D3D12 DRED (Device Removed Extended Data) and GPU-Based Validation in Release builds. "
        "Captures breadcrumbs and page-fault data after TDRs; costs perf. Takes effect on next launch.");
 
+#ifdef _DEBUG
+static constexpr int kDefaultVulkanValidation = 1;
+#else
+static constexpr int kDefaultVulkanValidation = 0;
+#endif
+CONVAR(r_vulkan_validation, kDefaultVulkanValidation, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable Vulkan validation layers and debug callback. Costs performance; takes effect on next launch.");
+
 CONVAR_BOUNDED(fps_max, 60, 0, 1000, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
                "Maximum frame rate (0=unlimited)");
 

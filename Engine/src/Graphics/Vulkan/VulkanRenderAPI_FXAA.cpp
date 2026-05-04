@@ -388,6 +388,9 @@ void VulkanRenderAPI::cleanupPostProcessingResources()
 {
     if (device == VK_NULL_HANDLE) return;
 
+    m_ppGraphBuilder.clearCachedFramebuffers();
+    m_rgBackend.clearCachedResources();
+
     fxaa_initialized = false;
 
     if (viewport_fxaa_pipeline != VK_NULL_HANDLE) {
@@ -472,6 +475,9 @@ void VulkanRenderAPI::cleanupPostProcessingResources()
 
 void VulkanRenderAPI::recreateOffscreenResources()
 {
+    m_ppGraphBuilder.clearCachedFramebuffers();
+    m_rgBackend.clearCachedResources();
+
     // Clean up existing FXAA swapchain framebuffers
     for (auto fb : fxaa_framebuffers) {
         if (fb != VK_NULL_HANDLE)

@@ -45,6 +45,10 @@ public:
     void beginFrame() override;
     void endFrame() override;
 
+    // Destroy cached transient images. Call only after the device is idle or
+    // when the caller otherwise guarantees no command buffer references them.
+    void clearCachedResources();
+
     // Bind an imported (externally-owned) image to a graph handle. The view
     // is optional but required for any pass that calls getImageView() on this
     // handle (e.g. attachments built from imported images, sampler bindings
@@ -75,6 +79,9 @@ private:
         VkImageLayout currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         VkImageAspectFlags aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         bool imported = false;
+        RGTextureDesc desc{};
+        VkFormat format = VK_FORMAT_UNDEFINED;
+        bool hasDesc = false;
     };
 
     std::unordered_map<uint16_t, ImageEntry> m_images;
@@ -86,4 +93,10 @@ private:
     static VkAccessFlags toVkAccessMask(RGResourceUsage usage);
     static VkPipelineStageFlags toVkStageMask(RGResourceUsage usage);
     static bool isDepthFormat(RGFormat format);
+
+    bool transientDescMatches(const ImageEntry& entry,
+                              const RGTextureDesc& desc,
+                              VkFormat format,
+                              VkImageAspectFlags aspect) const;
+    void releaseImageEntry(ImageEntry& entry, bool deferDestroy);
 };

@@ -15,12 +15,66 @@ void VulkanRGBackend::setCommandBuffer(VkCommandBuffer commandBuffer)
     m_context.commandBuffer = commandBuffer;
 }
 
+bool VulkanRGBackend::transientDescMatches(const ImageEntry& entry,
+                                           const RGTextureDesc& desc,
+                                           VkFormat format,
+                                           VkImageAspectFlags aspect) const
+{
+    return entry.hasDesc
+        && entry.format == format
+        && entry.aspectMask == aspect
+        && entry.desc.width == desc.width
+        && entry.desc.height == desc.height
+        && entry.desc.arraySize == desc.arraySize
+        && entry.desc.mipLevels == desc.mipLevels
+        && entry.desc.format == desc.format;
+}
+
+void VulkanRGBackend::releaseImageEntry(ImageEntry& entry, bool deferDestroy)
+{
+    if (entry.imported) {
+        entry = ImageEntry{};
+        return;
+    }
+
+    VkDevice device = m_device;
+    VmaAllocator allocator = m_allocator;
+    VkImageView view = entry.view;
+    VkImage image = entry.image;
+    VmaAllocation allocation = entry.allocation;
+
+    entry = ImageEntry{};
+
+    if (view == VK_NULL_HANDLE && (image == VK_NULL_HANDLE || allocation == nullptr)) {
+        return;
+    }
+
+    if (deferDestroy && m_deletionQueue) {
+        m_deletionQueue->push([device, allocator, view, image, allocation]() {
+            if (view != VK_NULL_HANDLE)
+                vkDestroyImageView(device, view, nullptr);
+            if (image != VK_NULL_HANDLE && allocation != nullptr && allocator != nullptr)
+                vmaDestroyImage(allocator, image, allocation);
+        });
+        return;
+    }
+
+    if (view != VK_NULL_HANDLE)
+        vkDestroyImageView(device, view, nullptr);
+    if (image != VK_NULL_HANDLE && allocation != nullptr && allocator != nullptr)
+        vmaDestroyImage(allocator, image, allocation);
+}
+
 void VulkanRGBackend::bindImportedImage(RGResourceHandle handle, VkImage image,
                                         VkImageView view,
                                         VkImageLayout currentLayout,
                                         VkImageAspectFlags aspectMask)
 {
     auto& entry = m_images[handle.index];
+    if (!entry.imported && entry.image != VK_NULL_HANDLE) {
+        releaseImageEntry(entry, true);
+    }
+
     entry.image = image;
     entry.view = view;
     entry.currentLayout = currentLayout;
@@ -38,12 +92,22 @@ void VulkanRGBackend::setCurrentLayout(RGResourceHandle handle, VkImageLayout la
 void VulkanRGBackend::createTransientTexture(RGResourceHandle handle, const RGTextureDesc& desc)
 {
     if (!m_device || !m_allocator) return;
-    auto it = m_images.find(handle.index);
-    if (it != m_images.end() && it->second.image != VK_NULL_HANDLE) return;
 
     const bool depth = isDepthFormat(desc.format);
     const VkFormat format = toVkFormat(desc.format);
     const VkImageAspectFlags aspect = depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+
+    auto it = m_images.find(handle.index);
+    if (it != m_images.end() && it->second.image != VK_NULL_HANDLE) {
+        auto& existing = it->second;
+        if (!existing.imported && transientDescMatches(existing, desc, format, aspect)) {
+            existing.currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            return;
+        }
+
+        releaseImageEntry(existing, true);
+        m_images.erase(it);
+    }
 
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT;
     if (depth) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
@@ -75,6 +139,9 @@ void VulkanRGBackend::createTransientTexture(RGResourceHandle handle, const RGTe
     entry.currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     entry.aspectMask    = aspect;
     entry.imported      = false;
+    entry.desc          = desc;
+    entry.format        = format;
+    entry.hasDesc       = true;
 }
 
 void VulkanRGBackend::destroyTransientTexture(RGResourceHandle handle)
@@ -82,35 +149,15 @@ void VulkanRGBackend::destroyTransientTexture(RGResourceHandle handle)
     auto it = m_images.find(handle.index);
     if (it == m_images.end()) return;
     auto& entry = it->second;
-    if (entry.imported) return;
-
-    // The transient was just used in the command buffer that hasn't been
-    // submitted yet. Defer destruction past GPU completion via the deletion
-    // queue (default 3-frame delay). Falling back to immediate destruction
-    // would violate the Vulkan validity rules for VkImage/VkImageView.
-    VkDevice     device     = m_device;
-    VmaAllocator allocator  = m_allocator;
-    VkImageView  view       = entry.view;
-    VkImage      image      = entry.image;
-    VmaAllocation allocation = entry.allocation;
-
-    if (m_deletionQueue) {
-        m_deletionQueue->push([device, allocator, view, image, allocation]() {
-            if (view != VK_NULL_HANDLE)
-                vkDestroyImageView(device, view, nullptr);
-            if (image != VK_NULL_HANDLE && allocation != nullptr)
-                vmaDestroyImage(allocator, image, allocation);
-        });
-    } else {
-        // No deletion queue wired up — fall back to inline destruction.
-        // Hit during shutdown after deletion_queue.flushAll() runs.
-        if (view != VK_NULL_HANDLE)
-            vkDestroyImageView(device, view, nullptr);
-        if (image != VK_NULL_HANDLE && allocation != nullptr)
-            vmaDestroyImage(allocator, image, allocation);
+    if (entry.imported) {
+        m_images.erase(it);
+        return;
     }
 
-    m_images.erase(it);
+    // Keep compatible transients resident across graph executions. The next
+    // createTransientTexture() call either reuses this image or frees it if the
+    // descriptor changed.
+    entry.currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
 VkImage VulkanRGBackend::getImage(RGResourceHandle handle) const
@@ -226,6 +273,17 @@ void VulkanRGBackend::endFrame()
         else
             ++it;
     }
+}
+
+void VulkanRGBackend::clearCachedResources()
+{
+    for (auto& pair : m_images) {
+        releaseImageEntry(pair.second, false);
+    }
+    m_images.clear();
+    m_pendingBarriers.clear();
+    m_srcStageMask = 0;
+    m_dstStageMask = 0;
 }
 
 VkImageLayout VulkanRGBackend::toVkLayout(RGResourceUsage usage)

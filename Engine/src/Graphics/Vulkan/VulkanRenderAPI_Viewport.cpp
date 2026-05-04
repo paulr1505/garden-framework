@@ -308,6 +308,9 @@ void VulkanRenderAPI::destroyViewportResources()
 
     vkDeviceWaitIdle(device);
 
+    m_ppGraphBuilder.clearCachedFramebuffers();
+    m_rgBackend.clearCachedResources();
+
     if (viewport_imgui_ds != VK_NULL_HANDLE) {
         if (ImGuiManager::get().isInitialized())
             ImGui_ImplVulkan_RemoveTexture(viewport_imgui_ds);
@@ -1173,6 +1176,9 @@ void VulkanRenderAPI::destroyPIEViewport(int id)
 
     vkDeviceWaitIdle(device);
 
+    m_ppGraphBuilder.clearCachedFramebuffers();
+    m_rgBackend.clearCachedResources();
+
     if (m_active_scene_target == id) {
         m_active_scene_target = -1;
     }
@@ -1186,6 +1192,9 @@ void VulkanRenderAPI::destroyAllPIEViewports()
     if (m_pie_viewports.empty()) return;
 
     vkDeviceWaitIdle(device);
+
+    m_ppGraphBuilder.clearCachedFramebuffers();
+    m_rgBackend.clearCachedResources();
 
     m_active_scene_target = -1;
 
@@ -1205,6 +1214,8 @@ void VulkanRenderAPI::setPIEViewportSize(int id, int width, int height)
     if (it->second.width == width && it->second.height == height) return;
 
     vkDeviceWaitIdle(device);
+    m_ppGraphBuilder.clearCachedFramebuffers();
+    m_rgBackend.clearCachedResources();
     destroyPIEViewportResources(it->second);
     createPIEViewportResources(it->second, width, height);
 }

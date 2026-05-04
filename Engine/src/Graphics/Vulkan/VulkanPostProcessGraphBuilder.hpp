@@ -2,6 +2,7 @@
 
 #include "Graphics/RenderGraph/PostProcessGraphBuilder.hpp"
 #include <vulkan/vulkan.h>
+#include <vector>
 
 class VulkanRenderAPI;
 
@@ -11,6 +12,7 @@ public:
     VulkanPostProcessGraphBuilder() = default;
 
     void setAPI(VulkanRenderAPI* api) { m_api = api; }
+    void clearCachedFramebuffers();
 
     // Vulkan-specific per-frame inputs. Must be called before build().
     void setFrameInputs(VkImage         outputImage,
@@ -43,6 +45,21 @@ protected:
     VulkanRenderAPI* m_api = nullptr;
 
 private:
+    VkFramebuffer getCachedFramebuffer(VkRenderPass renderPass,
+                                       const VkImageView* attachments,
+                                       uint32_t attachmentCount,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint32_t layers);
+
+    struct CachedFramebuffer {
+        VkRenderPass renderPass = VK_NULL_HANDLE;
+        std::vector<VkImageView> attachments;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t layers = 1;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    };
 
     VkImage       m_outputImage          = VK_NULL_HANDLE;
     VkImageLayout m_outputInitialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -54,4 +71,5 @@ private:
     VkImageView   m_hdrView              = VK_NULL_HANDLE;
     VkImage       m_depthImage           = VK_NULL_HANDLE;
     VkImageView   m_depthView            = VK_NULL_HANDLE;
+    std::vector<CachedFramebuffer> m_framebufferCache;
 };

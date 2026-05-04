@@ -3,9 +3,11 @@
 #include "VulkanRGBackend.hpp"
 #include "Utils/Log.hpp"
 #include <glm/gtc/matrix_inverse.hpp>
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <memory>
+#include <utility>
 
 namespace {
 struct DeferredLocalHandles {
@@ -32,6 +34,69 @@ struct DeferredLightingCB {
     glm::vec2 _pad4;
 };
 } // namespace
+
+void VulkanPostProcessGraphBuilder::clearCachedFramebuffers()
+{
+    if (!m_api || m_api->device == VK_NULL_HANDLE) {
+        m_framebufferCache.clear();
+        return;
+    }
+
+    for (auto& cached : m_framebufferCache) {
+        if (cached.framebuffer != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(m_api->device, cached.framebuffer, nullptr);
+        }
+    }
+    m_framebufferCache.clear();
+}
+
+VkFramebuffer VulkanPostProcessGraphBuilder::getCachedFramebuffer(VkRenderPass renderPass,
+                                                                  const VkImageView* attachments,
+                                                                  uint32_t attachmentCount,
+                                                                  uint32_t width,
+                                                                  uint32_t height,
+                                                                  uint32_t layers)
+{
+    if (!m_api || m_api->device == VK_NULL_HANDLE || renderPass == VK_NULL_HANDLE
+        || !attachments || attachmentCount == 0) {
+        return VK_NULL_HANDLE;
+    }
+
+    for (const auto& cached : m_framebufferCache) {
+        if (cached.renderPass == renderPass
+            && cached.width == width
+            && cached.height == height
+            && cached.layers == layers
+            && cached.attachments.size() == attachmentCount
+            && std::equal(cached.attachments.begin(), cached.attachments.end(), attachments)) {
+            return cached.framebuffer;
+        }
+    }
+
+    VkFramebufferCreateInfo fbInfo{};
+    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbInfo.renderPass = renderPass;
+    fbInfo.attachmentCount = attachmentCount;
+    fbInfo.pAttachments = attachments;
+    fbInfo.width = width;
+    fbInfo.height = height;
+    fbInfo.layers = layers;
+
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    if (vkCreateFramebuffer(m_api->device, &fbInfo, nullptr, &framebuffer) != VK_SUCCESS) {
+        return VK_NULL_HANDLE;
+    }
+
+    CachedFramebuffer cached;
+    cached.renderPass = renderPass;
+    cached.attachments.assign(attachments, attachments + attachmentCount);
+    cached.width = width;
+    cached.height = height;
+    cached.layers = layers;
+    cached.framebuffer = framebuffer;
+    m_framebufferCache.push_back(std::move(cached));
+    return framebuffer;
+}
 
 void VulkanPostProcessGraphBuilder::setFrameInputs(VkImage       outputImage,
                                                     VkImageLayout outputInitialLayout,
@@ -218,24 +283,14 @@ void VulkanPostProcessGraphBuilder::recordSkybox(RGContext&, const Handles& h, c
 
     VkExtent2D extent = { cfg.width, cfg.height };
     std::array<VkImageView, 2> attachments = { hdrView, depthView };
-    VkFramebufferCreateInfo fbInfo{};
-    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    fbInfo.renderPass = api->skybox_rg_render_pass;
-    fbInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-    fbInfo.pAttachments = attachments.data();
-    fbInfo.width = cfg.width;
-    fbInfo.height = cfg.height;
-    fbInfo.layers = 1;
-
-    VkFramebuffer framebuffer = VK_NULL_HANDLE;
-    if (vkCreateFramebuffer(api->device, &fbInfo, nullptr, &framebuffer) != VK_SUCCESS) {
+    VkFramebuffer framebuffer = getCachedFramebuffer(api->skybox_rg_render_pass,
+                                                     attachments.data(),
+                                                     static_cast<uint32_t>(attachments.size()),
+                                                     cfg.width, cfg.height, 1);
+    if (framebuffer == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] Skybox pass: failed to create framebuffer");
         return;
     }
-    VkDevice dev = api->device;
-    api->deletion_queue.push([dev, framebuffer]() {
-        vkDestroyFramebuffer(dev, framebuffer, nullptr);
-    });
 
     VkRenderPassBeginInfo rpInfo{};
     rpInfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -453,25 +508,15 @@ void VulkanPostProcessGraphBuilder::addScenePasses(RenderGraph& graph, const Han
             }
 
             std::array<VkImageView, 4> attachments = { gb0View, gb1View, gb2View, depthView };
-            VkFramebufferCreateInfo fbInfo{};
-            fbInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            fbInfo.renderPass      = rp;
-            fbInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-            fbInfo.pAttachments    = attachments.data();
-            fbInfo.width           = cfg.width;
-            fbInfo.height          = cfg.height;
-            fbInfo.layers          = 1;
-
-            VkFramebuffer framebuffer = VK_NULL_HANDLE;
-            if (vkCreateFramebuffer(m_api->device, &fbInfo, nullptr, &framebuffer) != VK_SUCCESS) {
+            VkFramebuffer framebuffer = getCachedFramebuffer(rp,
+                                                             attachments.data(),
+                                                             static_cast<uint32_t>(attachments.size()),
+                                                             cfg.width, cfg.height, 1);
+            if (framebuffer == VK_NULL_HANDLE) {
                 LOG_ENGINE_ERROR("[Vulkan] GBuffer pass: failed to create framebuffer");
                 m_api->m_deferredOpaqueCmds.clear();
                 return;
             }
-            VkDevice dev = m_api->device;
-            m_api->deletion_queue.push([dev, framebuffer]() {
-                vkDestroyFramebuffer(dev, framebuffer, nullptr);
-            });
 
             std::array<VkClearValue, 4> clears{};
             for (int i = 0; i < 3; ++i) clears[i].color = {{ 0.0f, 0.0f, 0.0f, 0.0f }};
@@ -648,24 +693,13 @@ void VulkanPostProcessGraphBuilder::addScenePasses(RenderGraph& graph, const Han
                                    static_cast<uint32_t>(writes.size()),
                                    writes.data(), 0, nullptr);
 
-            VkFramebufferCreateInfo fbInfo{};
-            fbInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            fbInfo.renderPass      = deferredPass.getRenderPass();
-            fbInfo.attachmentCount = 1;
-            fbInfo.pAttachments    = &hdrV;
-            fbInfo.width           = cfg.width;
-            fbInfo.height          = cfg.height;
-            fbInfo.layers          = 1;
-
-            VkFramebuffer framebuffer = VK_NULL_HANDLE;
-            if (vkCreateFramebuffer(m_api->device, &fbInfo, nullptr, &framebuffer) != VK_SUCCESS) {
+            VkFramebuffer framebuffer = getCachedFramebuffer(deferredPass.getRenderPass(),
+                                                             &hdrV, 1,
+                                                             cfg.width, cfg.height, 1);
+            if (framebuffer == VK_NULL_HANDLE) {
                 LOG_ENGINE_ERROR("[Vulkan] DeferredLighting: failed to create framebuffer");
                 return;
             }
-            VkDevice dev = m_api->device;
-            m_api->deletion_queue.push([dev, framebuffer]() {
-                vkDestroyFramebuffer(dev, framebuffer, nullptr);
-            });
 
             VkClearValue clear{};
             clear.color = {{ 0.0f, 0.0f, 0.0f, 0.0f }};
@@ -749,26 +783,16 @@ void VulkanPostProcessGraphBuilder::addPreTonemapPasses(RenderGraph& graph,
             }
 
             std::array<VkImageView, 2> attachments = { hdrView, depthView };
-            VkFramebufferCreateInfo fbInfo{};
-            fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            fbInfo.renderPass = rp;
-            fbInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-            fbInfo.pAttachments = attachments.data();
-            fbInfo.width = cfg.width;
-            fbInfo.height = cfg.height;
-            fbInfo.layers = 1;
-
-            VkFramebuffer framebuffer = VK_NULL_HANDLE;
-            if (vkCreateFramebuffer(m_api->device, &fbInfo, nullptr, &framebuffer) != VK_SUCCESS) {
+            VkFramebuffer framebuffer = getCachedFramebuffer(rp,
+                                                             attachments.data(),
+                                                             static_cast<uint32_t>(attachments.size()),
+                                                             cfg.width, cfg.height, 1);
+            if (framebuffer == VK_NULL_HANDLE) {
                 LOG_ENGINE_ERROR("[Vulkan] TransparentForward: failed to create framebuffer");
                 m_api->m_deferredTransparentCmds.clear();
                 m_api->m_deferredDebugLineVertices.clear();
                 return;
             }
-            VkDevice dev = m_api->device;
-            m_api->deletion_queue.push([dev, framebuffer]() {
-                vkDestroyFramebuffer(dev, framebuffer, nullptr);
-            });
 
             VkRenderPassBeginInfo rpBegin{};
             rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
