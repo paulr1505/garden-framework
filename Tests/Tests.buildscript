@@ -1,1 +1,2 @@
 include = PhysicsTests/PhysicsTests.buildscript
+include = NetworkStressTests/NetworkStressTests.buildscript
