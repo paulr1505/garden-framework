@@ -8,6 +8,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include "Character/CharacterControllerSystem.hpp"
 #include "Components/Components.hpp"
+#include "Physics/PhysicsSettings.hpp"
 #include <entt/entt.hpp>
 #include <vector>
 #include <unordered_map>
@@ -53,89 +54,69 @@
 #include "Events/EventBus.hpp"
 #include <mutex>
 
-// Jolt object layers
-namespace Layers
-{
-    static constexpr JPH::ObjectLayer NON_MOVING = 0;
-    static constexpr JPH::ObjectLayer MOVING = 1;
-    static constexpr JPH::ObjectLayer NUM_LAYERS = 2;
-};
-
-// BroadPhase layers
-namespace BroadPhaseLayers
-{
-    static constexpr JPH::BroadPhaseLayer NON_MOVING(0);
-    static constexpr JPH::BroadPhaseLayer MOVING(1);
-    static constexpr unsigned int NUM_LAYERS = 2;
-};
-
 // BroadPhaseLayerInterface implementation
 class BPLayerInterfaceImpl final : public JPH::BroadPhaseLayerInterface
 {
 public:
-    BPLayerInterfaceImpl()
-    {
-        m_object_to_broadphase[Layers::NON_MOVING] = BroadPhaseLayers::NON_MOVING;
-        m_object_to_broadphase[Layers::MOVING] = BroadPhaseLayers::MOVING;
-    }
+    explicit BPLayerInterfaceImpl(const PhysicsLayerSettings& layer_settings = {})
+        : layers(layer_settings) {}
 
-    virtual unsigned int GetNumBroadPhaseLayers() const override { return BroadPhaseLayers::NUM_LAYERS; }
+    void setLayerSettings(const PhysicsLayerSettings& layer_settings) { layers = layer_settings; }
+
+    virtual unsigned int GetNumBroadPhaseLayers() const override { return layers.broad_phase_layer_count; }
 
     virtual JPH::BroadPhaseLayer GetBroadPhaseLayer(JPH::ObjectLayer inLayer) const override
     {
-        return m_object_to_broadphase[inLayer];
+        return layers.broadPhaseForObjectLayer(inLayer);
     }
 
 #if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
     virtual const char* GetBroadPhaseLayerName(JPH::BroadPhaseLayer inLayer) const override
     {
-        switch ((JPH::BroadPhaseLayer::Type)inLayer)
-        {
-        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::NON_MOVING: return "NON_MOVING";
-        case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::MOVING: return "MOVING";
-        default: return "INVALID";
-        }
+        if (inLayer == layers.static_broad_phase) return "Static";
+        if (inLayer == layers.dynamic_broad_phase) return "Dynamic";
+        return "Invalid";
     }
 #endif
 
 private:
-    JPH::BroadPhaseLayer m_object_to_broadphase[Layers::NUM_LAYERS];
+    PhysicsLayerSettings layers;
 };
 
 // ObjectVsBroadPhaseLayerFilter implementation
 class ObjectVsBroadPhaseLayerFilterImpl : public JPH::ObjectVsBroadPhaseLayerFilter
 {
 public:
+    explicit ObjectVsBroadPhaseLayerFilterImpl(const PhysicsLayerSettings& layer_settings = {})
+        : layers(layer_settings) {}
+
+    void setLayerSettings(const PhysicsLayerSettings& layer_settings) { layers = layer_settings; }
+
     virtual bool ShouldCollide(JPH::ObjectLayer inLayer1, JPH::BroadPhaseLayer inLayer2) const override
     {
-        switch (inLayer1)
-        {
-        case Layers::NON_MOVING:
-            return inLayer2 == BroadPhaseLayers::MOVING;
-        case Layers::MOVING:
-            return true;
-        default:
-            return false;
-        }
+        return layers.shouldObjectCollideWithBroadPhase(inLayer1, inLayer2);
     }
+
+private:
+    PhysicsLayerSettings layers;
 };
 
 // ObjectLayerPairFilter implementation
 class ObjectLayerPairFilterImpl : public JPH::ObjectLayerPairFilter
 {
 public:
+    explicit ObjectLayerPairFilterImpl(const PhysicsLayerSettings& layer_settings = {})
+        : layers(layer_settings) {}
+
+    void setLayerSettings(const PhysicsLayerSettings& layer_settings) { layers = layer_settings; }
+
     virtual bool ShouldCollide(JPH::ObjectLayer inObject1, JPH::ObjectLayer inObject2) const override
     {
-        switch (inObject1)
-        {
-        case Layers::NON_MOVING:
-            return inObject2 == Layers::MOVING;
-        case Layers::MOVING:
-            return true;
-        default:
-            return false;
-        }
+        return layers.shouldObjectsCollide(inObject1, inObject2);
     }
+
+private:
+    PhysicsLayerSettings layers;
 };
 
 // Contact listener that queues CollisionEvents for main-thread dispatch
@@ -198,6 +179,7 @@ private:
 class ENGINE_API PhysicsSystem
 {
 private:
+    PhysicsSystemSettings settings;
     glm::vec3 gravity;
     float fixed_delta;
 
@@ -242,20 +224,14 @@ private:
     }
 
     // Safety helpers
-    static constexpr float MAX_VELOCITY = 100.0f; // m/s
-
     static bool isValidVec3(const glm::vec3& v)
     {
         return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
     }
 
-    static glm::vec3 clampVelocity(const glm::vec3& v)
-    {
-        float len = glm::length(v);
-        if (len > MAX_VELOCITY)
-            return v * (MAX_VELOCITY / len);
-        return v;
-    }
+    glm::vec3 clampVelocity(const glm::vec3& v) const;
+    glm::vec3 gravityAcceleration() const { return gravity * settings.gravity_acceleration; }
+    void applySettings(const PhysicsSystemSettings& new_settings);
 
 public:
     struct PhysicsBodyDesc
@@ -267,6 +243,7 @@ public:
         bool lock_rotation = true;
     };
 
+    explicit PhysicsSystem(const PhysicsSystemSettings& settings);
     PhysicsSystem(const glm::vec3& gravityVector = glm::vec3(0, -1, 0), float deltaTime = 1.0f / 60.0f);
     ~PhysicsSystem();
 
@@ -276,8 +253,15 @@ public:
     // Getters and setters
     void setGravity(const glm::vec3& gravityVector);
     glm::vec3 getGravity() const { return gravity; }
+    float getGravityAcceleration() const { return settings.gravity_acceleration; }
+    const PhysicsSystemSettings& getSettings() const { return settings; }
+    bool configure(const PhysicsSystemSettings& new_settings);
 
-    void setFixedDelta(float deltaTime) { fixed_delta = deltaTime; }
+    void setFixedDelta(float deltaTime)
+    {
+        fixed_delta = deltaTime > 0.0f ? deltaTime : 0.0001f;
+        settings.fixed_delta = fixed_delta;
+    }
     float getFixedDelta() const { return fixed_delta; }
 
     // Shape creation

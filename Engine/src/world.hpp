@@ -18,11 +18,12 @@ public:
     camera world_camera;
     float fixed_delta;
 
-    world()
+    explicit world(const PhysicsSystemSettings& physics_settings = PhysicsSystemSettings())
     {
         world_camera = camera(0, 0, -5);
-        fixed_delta = 1.0f / 60.0f;
-        physics_system = std::make_unique<PhysicsSystem>(glm::vec3(0, -1, 0), fixed_delta);
+        fixed_delta = physics_settings.fixed_delta;
+        physics_system = std::make_unique<PhysicsSystem>(physics_settings);
+        fixed_delta = physics_system->getFixedDelta();
     }
 
     // Initialize Jolt physics (call after world construction)
@@ -116,8 +117,17 @@ public:
 
     void setFixedDelta(float delta)
     {
-        fixed_delta = delta;
         physics_system->setFixedDelta(delta);
+        fixed_delta = physics_system->getFixedDelta();
+    }
+
+    bool configurePhysics(const PhysicsSystemSettings& physics_settings)
+    {
+        if (!physics_system->configure(physics_settings))
+            return false;
+        fixed_delta = physics_system->getFixedDelta();
+        physics_accumulator = 0.0f;
+        return true;
     }
 
     // Full reset: tear down physics, clear ECS, reinitialize.

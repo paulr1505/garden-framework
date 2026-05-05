@@ -2,6 +2,7 @@
 
 #include "Character/CharacterController.hpp"
 #include "EngineExport.h"
+#include "Physics/PhysicsSettings.hpp"
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/Body/BodyID.h>
@@ -42,7 +43,7 @@ public:
                        JPH::PhysicsSystem& physics_system,
                        JPH::TempAllocator& temp_allocator,
                        BodyEntityMap& body_to_entity,
-                       JPH::ObjectLayer moving_layer);
+                       const PhysicsLayerSettings& layer_settings);
     void remove(entt::entity entity, BodyEntityMap& body_to_entity);
     bool has(entt::entity entity) const;
 
@@ -52,29 +53,27 @@ public:
                   const CharacterControllerState& state,
                   JPH::PhysicsSystem& physics_system,
                   JPH::TempAllocator& temp_allocator,
-                  JPH::ObjectLayer moving_layer);
+                  const PhysicsLayerSettings& layer_settings);
     bool teleport(entt::registry& registry,
                   entt::entity entity,
                   const glm::vec3& position,
                   JPH::PhysicsSystem& physics_system,
                   JPH::TempAllocator& temp_allocator,
-                  JPH::ObjectLayer moving_layer);
+                  const PhysicsLayerSettings& layer_settings);
     bool refresh(entt::registry& registry,
                  entt::entity entity,
                  JPH::PhysicsSystem& physics_system,
                  JPH::TempAllocator& temp_allocator,
-                 JPH::ObjectLayer moving_layer);
+                 const PhysicsLayerSettings& layer_settings);
 
     CharacterControllerState simulate(entt::registry& registry,
                                       entt::entity entity,
                                       const CharacterMoveInput& input,
                                       float delta_time,
-                                      const glm::vec3& gravity,
-                                      float fixed_delta,
+                                      const PhysicsSystemSettings& settings,
                                       JPH::PhysicsSystem& physics_system,
                                       JPH::TempAllocator& temp_allocator,
-                                      BodyEntityMap& body_to_entity,
-                                      JPH::ObjectLayer moving_layer);
+                                      BodyEntityMap& body_to_entity);
 
 private:
     struct Runtime;

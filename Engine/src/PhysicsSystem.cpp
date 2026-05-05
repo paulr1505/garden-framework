@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdlib>
+#include <thread>
 
 static void JoltTrace(const char* inFMT, ...)
 {
@@ -23,7 +24,53 @@ static bool isFiniteVertexPosition(const vertex& v)
     return std::isfinite(v.vx) && std::isfinite(v.vy) && std::isfinite(v.vz);
 }
 
-static bool isUsableTriangle(const vertex& v0, const vertex& v1, const vertex& v2)
+static uint32_t resolveWorkerThreadCount(uint32_t requested)
+{
+    if (requested > 0)
+        return requested;
+
+    const uint32_t hardware_threads = std::thread::hardware_concurrency();
+    return hardware_threads > 1 ? hardware_threads - 1 : 1;
+}
+
+static PhysicsSystemSettings sanitizePhysicsSettings(PhysicsSystemSettings sanitized)
+{
+    sanitized.gravity_acceleration = std::max(sanitized.gravity_acceleration, 0.0f);
+    sanitized.fixed_delta = std::max(sanitized.fixed_delta, 0.0001f);
+
+    sanitized.max_bodies = std::max<uint32_t>(sanitized.max_bodies, 1);
+    sanitized.max_body_pairs = std::max<uint32_t>(sanitized.max_body_pairs, 1);
+    sanitized.max_contact_constraints = std::max<uint32_t>(sanitized.max_contact_constraints, 1);
+    sanitized.temp_allocator_size_bytes = std::max<uint32_t>(sanitized.temp_allocator_size_bytes, 1024u * 1024u);
+    sanitized.worker_thread_count = resolveWorkerThreadCount(sanitized.worker_thread_count);
+    sanitized.collision_steps = std::max<uint32_t>(sanitized.collision_steps, 1);
+
+    sanitized.max_body_velocity = std::max(sanitized.max_body_velocity, 0.0f);
+    sanitized.max_character_velocity = std::max(sanitized.max_character_velocity, 0.0f);
+    sanitized.min_body_mass = std::max(sanitized.min_body_mass, 0.000001f);
+    sanitized.dynamic_linear_damping = std::max(sanitized.dynamic_linear_damping, 0.0f);
+    sanitized.kinematic_gravity_factor = std::max(sanitized.kinematic_gravity_factor, 0.0f);
+    sanitized.force_epsilon = std::max(sanitized.force_epsilon, 0.0f);
+
+    sanitized.mesh_degenerate_triangle_epsilon = std::max(sanitized.mesh_degenerate_triangle_epsilon, 0.0f);
+    sanitized.player_ground_probe_padding = std::max(sanitized.player_ground_probe_padding, 0.0f);
+    sanitized.player_min_ground_normal_y = std::clamp(sanitized.player_min_ground_normal_y, -1.0f, 1.0f);
+    sanitized.raycast_direction_epsilon = std::max(sanitized.raycast_direction_epsilon, 0.0f);
+
+    if (sanitized.layers.object_layer_count <= sanitized.layers.static_body)
+        sanitized.layers.object_layer_count = sanitized.layers.static_body + 1;
+    if (sanitized.layers.object_layer_count <= sanitized.layers.dynamic_body)
+        sanitized.layers.object_layer_count = sanitized.layers.dynamic_body + 1;
+
+    const uint32_t static_broad_phase_index = uint32_t(sanitized.layers.static_broad_phase.GetValue());
+    const uint32_t dynamic_broad_phase_index = uint32_t(sanitized.layers.dynamic_broad_phase.GetValue());
+    const uint32_t needed_broad_phase_count = std::max(static_broad_phase_index, dynamic_broad_phase_index) + 1;
+    sanitized.layers.broad_phase_layer_count = std::max(sanitized.layers.broad_phase_layer_count, needed_broad_phase_count);
+
+    return sanitized;
+}
+
+static bool isUsableTriangle(const vertex& v0, const vertex& v1, const vertex& v2, float epsilon)
 {
     if (!isFiniteVertexPosition(v0) || !isFiniteVertexPosition(v1) || !isFiniteVertexPosition(v2))
         return false;
@@ -32,17 +79,56 @@ static bool isUsableTriangle(const vertex& v0, const vertex& v1, const vertex& v
     const glm::vec3 p1(v1.vx, v1.vy, v1.vz);
     const glm::vec3 p2(v2.vx, v2.vy, v2.vz);
     const glm::vec3 area_vec = glm::cross(p1 - p0, p2 - p0);
-    return glm::dot(area_vec, area_vec) > 1.0e-12f;
+    return glm::dot(area_vec, area_vec) > epsilon;
+}
+
+PhysicsSystem::PhysicsSystem(const PhysicsSystemSettings& system_settings)
+{
+    applySettings(system_settings);
 }
 
 PhysicsSystem::PhysicsSystem(const glm::vec3& gravityVector, float deltaTime)
-    : gravity(gravityVector), fixed_delta(deltaTime)
 {
+    PhysicsSystemSettings defaults;
+    defaults.gravity_direction = gravityVector;
+    defaults.fixed_delta = deltaTime;
+    applySettings(defaults);
 }
 
 PhysicsSystem::~PhysicsSystem()
 {
     shutdown();
+}
+
+void PhysicsSystem::applySettings(const PhysicsSystemSettings& new_settings)
+{
+    settings = sanitizePhysicsSettings(new_settings);
+    gravity = settings.gravity_direction;
+    fixed_delta = settings.fixed_delta;
+
+    broad_phase_layer_interface.setLayerSettings(settings.layers);
+    object_vs_broadphase_filter.setLayerSettings(settings.layers);
+    object_layer_pair_filter.setLayerSettings(settings.layers);
+}
+
+bool PhysicsSystem::configure(const PhysicsSystemSettings& new_settings)
+{
+    if (initialized)
+    {
+        LOG_ENGINE_WARN("PhysicsSystem::configure ignored after initialization; call shutdown before reconfiguring Jolt world settings");
+        return false;
+    }
+
+    applySettings(new_settings);
+    return true;
+}
+
+glm::vec3 PhysicsSystem::clampVelocity(const glm::vec3& v) const
+{
+    const float len = glm::length(v);
+    if (settings.max_body_velocity > 0.0f && len > settings.max_body_velocity)
+        return v * (settings.max_body_velocity / len);
+    return v;
 }
 
 void PhysicsSystem::initialize()
@@ -73,24 +159,17 @@ void PhysicsSystem::initialize()
     }
 
     // Create allocator and job system
-    temp_allocator = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024); // 10 MB
-    job_system = std::make_unique<JPH::JobSystemThreadPool>(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1);
-
-    // Create physics system
-    const unsigned int cMaxBodies = 1024;
-    const unsigned int cNumBodyMutexes = 0; // default
-    const unsigned int cMaxBodyPairs = 1024;
-    const unsigned int cMaxContactConstraints = 1024;
+    temp_allocator = std::make_unique<JPH::TempAllocatorImpl>(settings.temp_allocator_size_bytes);
+    job_system = std::make_unique<JPH::JobSystemThreadPool>(
+        JPH::cMaxPhysicsJobs,
+        JPH::cMaxPhysicsBarriers,
+        settings.worker_thread_count);
 
     jolt_system = std::make_unique<JPH::PhysicsSystem>();
-    jolt_system->Init(cMaxBodies, cNumBodyMutexes, cMaxBodyPairs, cMaxContactConstraints,
+    jolt_system->Init(settings.max_bodies, settings.body_mutex_count, settings.max_body_pairs, settings.max_contact_constraints,
         broad_phase_layer_interface, object_vs_broadphase_filter, object_layer_pair_filter);
 
-    // Set gravity (Jolt uses a much larger scale, our gravity is a unit direction * magnitude)
-    // The old system used gravity as acceleration added per frame: velocity += gravity * delta
-    // Jolt expects gravity in m/s^2. Our old gravity (0,-1,0) with delta 0.16 gave ~6.25 m/s^2 effective.
-    // Let's scale to realistic: -9.81 m/s^2 on Y
-    jolt_system->SetGravity(JPH::Vec3(gravity.x * 9.81f, gravity.y * 9.81f, gravity.z * 9.81f));
+    jolt_system->SetGravity(toJolt(gravityAcceleration()));
 
     // Set up contact listener for collision events
     contact_listener = std::make_unique<EngineContactListener>();
@@ -98,7 +177,7 @@ void PhysicsSystem::initialize()
     jolt_system->SetContactListener(contact_listener.get());
 
     initialized = true;
-    LOG_ENGINE_INFO("Jolt Physics initialized ({} threads)", std::thread::hardware_concurrency() - 1);
+    LOG_ENGINE_INFO("Jolt Physics initialized ({} worker threads, {} bodies)", settings.worker_thread_count, settings.max_bodies);
 }
 
 void PhysicsSystem::shutdown()
@@ -143,9 +222,10 @@ void PhysicsSystem::shutdown()
 void PhysicsSystem::setGravity(const glm::vec3& gravityVector)
 {
     gravity = gravityVector;
+    settings.gravity_direction = gravityVector;
     if (jolt_system)
     {
-        jolt_system->SetGravity(JPH::Vec3(gravity.x * 9.81f, gravity.y * 9.81f, gravity.z * 9.81f));
+        jolt_system->SetGravity(toJolt(gravityAcceleration()));
     }
 }
 
@@ -168,12 +248,12 @@ JPH::BodyID PhysicsSystem::createStaticBody(const glm::vec3& position, const glm
     if (entity_to_body.find(entity) != entity_to_body.end())
         removeBody(entity);
 
-    JPH::BodyCreationSettings settings(shape, toJoltR(position), toJoltQuat(rotation), JPH::EMotionType::Static, Layers::NON_MOVING);
-    settings.mFriction = desc.friction;
-    settings.mRestitution = desc.restitution;
+    JPH::BodyCreationSettings body_settings(shape, toJoltR(position), toJoltQuat(rotation), JPH::EMotionType::Static, settings.layers.static_body);
+    body_settings.mFriction = desc.friction;
+    body_settings.mRestitution = desc.restitution;
 
     JPH::BodyInterface& body_interface = jolt_system->GetBodyInterface();
-    JPH::Body* body = body_interface.CreateBody(settings);
+    JPH::Body* body = body_interface.CreateBody(body_settings);
     if (!body) return JPH::BodyID();
 
     JPH::BodyID body_id = body->GetID();
@@ -254,19 +334,19 @@ JPH::BodyID PhysicsSystem::createDynamicBody(const glm::vec3& position, const gl
     if (entity_to_body.find(entity) != entity_to_body.end())
         removeBody(entity);
 
-    JPH::BodyCreationSettings settings(shape, toJoltR(position), toJoltQuat(rotation), JPH::EMotionType::Dynamic, Layers::MOVING);
-    settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
-    settings.mMassPropertiesOverride.mMass = std::max(desc.mass, 0.001f);
+    JPH::BodyCreationSettings body_settings(shape, toJoltR(position), toJoltQuat(rotation), JPH::EMotionType::Dynamic, settings.layers.dynamic_body);
+    body_settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+    body_settings.mMassPropertiesOverride.mMass = std::max(desc.mass, settings.min_body_mass);
     if (desc.lock_rotation)
-        settings.mAllowedDOFs = JPH::EAllowedDOFs::TranslationX | JPH::EAllowedDOFs::TranslationY | JPH::EAllowedDOFs::TranslationZ;
-    settings.mMotionQuality = JPH::EMotionQuality::LinearCast; // CCD to prevent tunneling
-    settings.mFriction = desc.friction;
-    settings.mRestitution = desc.restitution;
-    settings.mGravityFactor = desc.apply_gravity ? 1.0f : 0.0f;
-    settings.mLinearDamping = 0.0f; // Disable Jolt damping; game code handles velocity damping
+        body_settings.mAllowedDOFs = JPH::EAllowedDOFs::TranslationX | JPH::EAllowedDOFs::TranslationY | JPH::EAllowedDOFs::TranslationZ;
+    body_settings.mMotionQuality = JPH::EMotionQuality::LinearCast; // CCD to prevent tunneling
+    body_settings.mFriction = desc.friction;
+    body_settings.mRestitution = desc.restitution;
+    body_settings.mGravityFactor = desc.apply_gravity ? 1.0f : 0.0f;
+    body_settings.mLinearDamping = settings.dynamic_linear_damping;
 
     JPH::BodyInterface& body_interface = jolt_system->GetBodyInterface();
-    JPH::Body* body = body_interface.CreateBody(settings);
+    JPH::Body* body = body_interface.CreateBody(body_settings);
     if (!body) return JPH::BodyID();
 
     JPH::BodyID body_id = body->GetID();
@@ -298,14 +378,14 @@ JPH::BodyID PhysicsSystem::createKinematicBody(const glm::vec3& position, const 
     if (entity_to_body.find(entity) != entity_to_body.end())
         removeBody(entity);
 
-    JPH::BodyCreationSettings settings(shape, toJoltR(position), toJoltQuat(rotation), JPH::EMotionType::Kinematic, Layers::MOVING);
-    settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
-    settings.mFriction = desc.friction;
-    settings.mRestitution = desc.restitution;
-    settings.mGravityFactor = 0.0f;
+    JPH::BodyCreationSettings body_settings(shape, toJoltR(position), toJoltQuat(rotation), JPH::EMotionType::Kinematic, settings.layers.dynamic_body);
+    body_settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
+    body_settings.mFriction = desc.friction;
+    body_settings.mRestitution = desc.restitution;
+    body_settings.mGravityFactor = settings.kinematic_gravity_factor;
 
     JPH::BodyInterface& body_interface = jolt_system->GetBodyInterface();
-    JPH::Body* body = body_interface.CreateBody(settings);
+    JPH::Body* body = body_interface.CreateBody(body_settings);
     if (!body) return JPH::BodyID();
 
     JPH::BodyID body_id = body->GetID();
@@ -333,7 +413,7 @@ JPH::BodyID PhysicsSystem::createStaticMeshBody(const glm::vec3& position, const
         const vertex& v0 = colliderMesh.vertices[i];
         const vertex& v1 = colliderMesh.vertices[i + 1];
         const vertex& v2 = colliderMesh.vertices[i + 2];
-        if (!isUsableTriangle(v0, v1, v2))
+        if (!isUsableTriangle(v0, v1, v2, settings.mesh_degenerate_triangle_epsilon))
             continue;
 
         triangles.push_back(JPH::Triangle(
@@ -398,7 +478,7 @@ JPH::BodyID PhysicsSystem::createCharacterController(entt::registry& registry, e
         initialize();
 
     return character_controllers.create(
-        registry, entity, *jolt_system, *temp_allocator, body_to_entity, Layers::MOVING);
+        registry, entity, *jolt_system, *temp_allocator, body_to_entity, settings.layers);
 }
 
 void PhysicsSystem::removeCharacterController(entt::entity entity)
@@ -418,7 +498,7 @@ bool PhysicsSystem::setCharacterControllerState(entt::registry& registry, entt::
         initialize();
 
     return character_controllers.setState(
-        registry, entity, state, *jolt_system, *temp_allocator, Layers::MOVING);
+        registry, entity, state, *jolt_system, *temp_allocator, settings.layers);
 }
 
 bool PhysicsSystem::teleportCharacterController(entt::registry& registry, entt::entity entity, const glm::vec3& position)
@@ -427,7 +507,7 @@ bool PhysicsSystem::teleportCharacterController(entt::registry& registry, entt::
         initialize();
 
     return character_controllers.teleport(
-        registry, entity, position, *jolt_system, *temp_allocator, Layers::MOVING);
+        registry, entity, position, *jolt_system, *temp_allocator, settings.layers);
 }
 
 CharacterControllerState PhysicsSystem::simulateCharacterController(entt::registry& registry, entt::entity entity,
@@ -437,8 +517,8 @@ CharacterControllerState PhysicsSystem::simulateCharacterController(entt::regist
         initialize();
 
     return character_controllers.simulate(
-        registry, entity, input, delta_time, gravity, fixed_delta,
-        *jolt_system, *temp_allocator, body_to_entity, Layers::MOVING);
+        registry, entity, input, delta_time, settings,
+        *jolt_system, *temp_allocator, body_to_entity);
 }
 
 PhysicsSystem::ShapeCastResult PhysicsSystem::shapeCast(const JPH::ShapeRefC& shape, const glm::vec3& position,
@@ -485,6 +565,9 @@ PhysicsSystem::ShapeCastResult PhysicsSystem::shapeCast(const JPH::ShapeRefC& sh
 PhysicsSystem::ShapeCastResult PhysicsSystem::sphereCast(const glm::vec3& origin, float radius,
     const glm::vec3& direction, float maxDistance)
 {
+    if (maxDistance <= 0.0f || glm::length(direction) <= settings.raycast_direction_epsilon)
+        return {};
+
     JPH::SphereShapeSettings sphere(radius);
     auto shape_result = sphere.Create();
     if (!shape_result.IsValid()) return {};
@@ -496,6 +579,9 @@ PhysicsSystem::ShapeCastResult PhysicsSystem::sphereCast(const glm::vec3& origin
 PhysicsSystem::ShapeCastResult PhysicsSystem::boxCast(const glm::vec3& origin, const glm::vec3& halfExtents,
     const glm::vec3& rotation, const glm::vec3& direction, float maxDistance)
 {
+    if (maxDistance <= 0.0f || glm::length(direction) <= settings.raycast_direction_epsilon)
+        return {};
+
     JPH::BoxShapeSettings box(toJolt(halfExtents));
     auto shape_result = box.Create();
     if (!shape_result.IsValid()) return {};
@@ -607,8 +693,7 @@ void PhysicsSystem::stepPhysics(entt::registry& registry)
     syncTransformsToJolt(registry);
 
     // Step Jolt physics
-    const int cCollisionSteps = 1;
-    jolt_system->Update(fixed_delta, cCollisionSteps, temp_allocator.get(), job_system.get());
+    jolt_system->Update(fixed_delta, settings.collision_steps, temp_allocator.get(), job_system.get());
 
     // Drain collision events to EventBus (main thread)
     if (contact_listener)
@@ -631,7 +716,7 @@ void PhysicsSystem::stepPhysics(entt::registry& registry)
         auto& transform = view.get<TransformComponent>(entity);
 
         if (rb.apply_gravity)
-            rb.velocity += gravity * 9.81f * fixed_delta;
+            rb.velocity += gravityAcceleration() * fixed_delta;
 
         rb.velocity += rb.force * fixed_delta;
         transform.position += rb.velocity * fixed_delta;
@@ -707,7 +792,7 @@ void PhysicsSystem::syncTransformsToJolt(entt::registry& registry)
         body_interface.SetLinearVelocity(body_id, toJolt(rb.velocity));
 
         // If game code applied forces, send them to Jolt (force = acceleration * mass)
-        if (glm::length(rb.force) > 0.001f)
+        if (glm::length(rb.force) > settings.force_epsilon)
         {
             if (isValidVec3(rb.force))
             {
@@ -723,7 +808,7 @@ void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entit
     if (!initialized || !registry.valid(playerEntity)) return;
     if (registry.all_of<CharacterControllerComponent>(playerEntity) && hasCharacterController(playerEntity))
     {
-        character_controllers.refresh(registry, playerEntity, *jolt_system, *temp_allocator, Layers::MOVING);
+        character_controllers.refresh(registry, playerEntity, *jolt_system, *temp_allocator, settings.layers);
         return;
     }
     if (!registry.all_of<TransformComponent, RigidBodyComponent, PlayerComponent>(playerEntity)) return;
@@ -738,7 +823,7 @@ void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entit
         // Ground detection: cast a ray downward, excluding the player's own body
         auto& transform = registry.get<TransformComponent>(playerEntity);
         // Ray length derived from capsule dimensions + tolerance
-        float ground_ray_length = player.capsule_half_height + player.capsule_radius + 0.3f;
+        float ground_ray_length = player.capsule_half_height + player.capsule_radius + settings.player_ground_probe_padding;
         JPH::RRayCast ray(toJoltR(transform.position), JPH::Vec3(0, -1, 0) * ground_ray_length);
         JPH::RayCastResult hit;
         JPH::IgnoreSingleBodyFilter body_filter(it->second);
@@ -764,7 +849,7 @@ void PhysicsSystem::handlePlayerCollisions(entt::registry& registry, entt::entit
             }
 
             // Reject surfaces too steep to stand on (~45 degrees)
-            if (player.ground_normal.y < 0.7f)
+            if (player.ground_normal.y < settings.player_min_ground_normal_y)
             {
                 player.grounded = false;
                 player.ground_normal = glm::vec3(0, 1, 0);
@@ -787,7 +872,7 @@ bool PhysicsSystem::raycast(const glm::vec3& origin, const glm::vec3& direction,
     entt::registry& registry, glm::vec3& hitPoint, glm::vec3& hitNormal)
 {
     if (!initialized) return false;
-    if (maxDistance <= 0.0f || glm::length(direction) <= 0.0001f) return false;
+    if (maxDistance <= 0.0f || glm::length(direction) <= settings.raycast_direction_epsilon) return false;
 
     JPH::Vec3 dir = toJolt(glm::normalize(direction)) * maxDistance;
     JPH::RRayCast ray(toJoltR(origin), dir);

@@ -16,8 +16,6 @@
 
 namespace
 {
-    constexpr float kMaxCharacterVelocity = 100.0f;
-
     uint64_t entityUserData(entt::entity entity)
     {
         return static_cast<uint64_t>(entt::to_integral(entity));
@@ -48,11 +46,11 @@ namespace
         return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
     }
 
-    glm::vec3 clampVelocity(const glm::vec3& v)
+    glm::vec3 clampVelocity(const glm::vec3& v, float max_velocity)
     {
         const float len = glm::length(v);
-        if (len > kMaxCharacterVelocity)
-            return v * (kMaxCharacterVelocity / len);
+        if (max_velocity > 0.0f && len > max_velocity)
+            return v * (max_velocity / len);
         return v;
     }
 
@@ -144,7 +142,7 @@ JPH::BodyID CharacterControllerSystem::create(entt::registry& registry,
                                               JPH::PhysicsSystem& physics_system,
                                               JPH::TempAllocator& temp_allocator,
                                               BodyEntityMap& body_to_entity,
-                                              JPH::ObjectLayer moving_layer)
+                                              const PhysicsLayerSettings& layer_settings)
 {
     if (!registry.valid(entity))
         return JPH::BodyID();
@@ -179,7 +177,7 @@ JPH::BodyID CharacterControllerSystem::create(entt::registry& registry,
     settings->mCharacterPadding = controller.character_padding;
     settings->mCollisionTolerance = controller.collision_tolerance;
     settings->mEnhancedInternalEdgeRemoval = controller.enhanced_internal_edge_removal;
-    settings->mInnerBodyLayer = moving_layer;
+    settings->mInnerBodyLayer = layer_settings.dynamic_body;
     if (controller.use_inner_body)
         settings->mInnerBodyShape = shape;
 
@@ -199,7 +197,7 @@ JPH::BodyID CharacterControllerSystem::create(entt::registry& registry,
         body_to_entity[inner_body] = entity;
 
     entity_to_character[entity] = std::move(runtime);
-    refresh(registry, entity, physics_system, temp_allocator, moving_layer);
+    refresh(registry, entity, physics_system, temp_allocator, layer_settings);
 
     LOG_ENGINE_INFO("Created character controller at ({}, {}, {})",
         transform.position.x, transform.position.y, transform.position.z);
@@ -271,7 +269,7 @@ bool CharacterControllerSystem::setState(entt::registry& registry,
                                          const CharacterControllerState& state,
                                          JPH::PhysicsSystem& physics_system,
                                          JPH::TempAllocator& temp_allocator,
-                                         JPH::ObjectLayer moving_layer)
+                                         const PhysicsLayerSettings& layer_settings)
 {
     if (!registry.valid(entity))
         return false;
@@ -289,7 +287,7 @@ bool CharacterControllerSystem::setState(entt::registry& registry,
 
     it->second->character->SetPosition(toJoltR(state.position));
     it->second->character->SetLinearVelocity(toJolt(state.velocity));
-    refresh(registry, entity, physics_system, temp_allocator, moving_layer);
+    refresh(registry, entity, physics_system, temp_allocator, layer_settings);
     return true;
 }
 
@@ -298,7 +296,7 @@ bool CharacterControllerSystem::teleport(entt::registry& registry,
                                          const glm::vec3& position,
                                          JPH::PhysicsSystem& physics_system,
                                          JPH::TempAllocator& temp_allocator,
-                                         JPH::ObjectLayer moving_layer)
+                                         const PhysicsLayerSettings& layer_settings)
 {
     if (!registry.valid(entity))
         return false;
@@ -306,14 +304,14 @@ bool CharacterControllerSystem::teleport(entt::registry& registry,
     CharacterControllerState state = getState(registry, entity);
     state.position = position;
     state.velocity = glm::vec3(0.0f);
-    return setState(registry, entity, state, physics_system, temp_allocator, moving_layer);
+    return setState(registry, entity, state, physics_system, temp_allocator, layer_settings);
 }
 
 bool CharacterControllerSystem::refresh(entt::registry& registry,
                                         entt::entity entity,
                                         JPH::PhysicsSystem& physics_system,
                                         JPH::TempAllocator& temp_allocator,
-                                        JPH::ObjectLayer moving_layer)
+                                        const PhysicsLayerSettings& layer_settings)
 {
     auto it = entity_to_character.find(entity);
     if (it == entity_to_character.end() || !it->second || !it->second->character)
@@ -332,8 +330,8 @@ bool CharacterControllerSystem::refresh(entt::registry& registry,
     JPH::BodyFilter body_filter;
     JPH::ShapeFilter shape_filter;
     character.RefreshContacts(
-        physics_system.GetDefaultBroadPhaseLayerFilter(moving_layer),
-        physics_system.GetDefaultLayerFilter(moving_layer),
+        physics_system.GetDefaultBroadPhaseLayerFilter(layer_settings.dynamic_body),
+        physics_system.GetDefaultLayerFilter(layer_settings.dynamic_body),
         body_filter,
         shape_filter,
         temp_allocator);
@@ -348,12 +346,10 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
                                                              entt::entity entity,
                                                              const CharacterMoveInput& input,
                                                              float delta_time,
-                                                             const glm::vec3& gravity,
-                                                             float fixed_delta,
+                                                             const PhysicsSystemSettings& settings,
                                                              JPH::PhysicsSystem& physics_system,
                                                              JPH::TempAllocator& temp_allocator,
-                                                             BodyEntityMap& body_to_entity,
-                                                             JPH::ObjectLayer moving_layer)
+                                                             BodyEntityMap& body_to_entity)
 {
     if (!registry.valid(entity))
         return {};
@@ -361,19 +357,19 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
         return {};
 
     if (entity_to_character.find(entity) == entity_to_character.end())
-        create(registry, entity, physics_system, temp_allocator, body_to_entity, moving_layer);
+        create(registry, entity, physics_system, temp_allocator, body_to_entity, settings.layers);
 
     auto it = entity_to_character.find(entity);
     if (it == entity_to_character.end() || !it->second || !it->second->character)
         return getState(registry, entity);
 
     if (delta_time <= 0.0f)
-        delta_time = fixed_delta;
+        delta_time = settings.fixed_delta;
 
     auto& controller = registry.get<CharacterControllerComponent>(entity);
     auto& character = *it->second->character;
 
-    refresh(registry, entity, physics_system, temp_allocator, moving_layer);
+    refresh(registry, entity, physics_system, temp_allocator, settings.layers);
     CharacterControllerState current = getState(registry, entity);
 
     CharacterMoveInput effective_input = input;
@@ -414,11 +410,11 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
         new_velocity.z = blended_horizontal.z;
     }
 
-    new_velocity += gravity * 9.81f * controller.gravity_scale * delta_time;
+    new_velocity += settings.gravity_direction * settings.gravity_acceleration * controller.gravity_scale * delta_time;
 
     if (!isValidVec3(new_velocity))
         new_velocity = glm::vec3(0.0f);
-    new_velocity = clampVelocity(new_velocity);
+    new_velocity = clampVelocity(new_velocity, settings.max_character_velocity);
 
     const JPH::RVec3 start_position = character.GetPosition();
     character.SetLinearVelocity(toJolt(new_velocity));
@@ -431,17 +427,17 @@ CharacterControllerState CharacterControllerSystem::simulate(entt::registry& reg
     JPH::ShapeFilter shape_filter;
     character.ExtendedUpdate(
         delta_time,
-        toJolt(gravity * 9.81f * controller.gravity_scale),
+        toJolt(settings.gravity_direction * settings.gravity_acceleration * controller.gravity_scale),
         update_settings,
-        physics_system.GetDefaultBroadPhaseLayerFilter(moving_layer),
-        physics_system.GetDefaultLayerFilter(moving_layer),
+        physics_system.GetDefaultBroadPhaseLayerFilter(settings.layers.dynamic_body),
+        physics_system.GetDefaultLayerFilter(settings.layers.dynamic_body),
         body_filter,
         shape_filter,
         temp_allocator);
 
     const JPH::RVec3 end_position = character.GetPosition();
     const glm::vec3 effective_velocity = toGlmR((end_position - start_position) / delta_time);
-    character.SetLinearVelocity(toJolt(clampVelocity(effective_velocity)));
+    character.SetLinearVelocity(toJolt(clampVelocity(effective_velocity, settings.max_character_velocity)));
 
     CharacterControllerState result = getState(registry, entity);
     result.velocity = effective_velocity;

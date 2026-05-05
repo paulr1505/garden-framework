@@ -105,6 +105,47 @@ static bool testDynamicGravityFlag()
     return pass(name);
 }
 
+static bool testPhysicsSettingsConfigureGravity()
+{
+    const std::string name = "physics settings configure gravity";
+
+    PhysicsSystemSettings settings;
+    settings.gravity_direction = glm::vec3(0.0f, -1.0f, 0.0f);
+    settings.gravity_acceleration = 1.0f;
+
+    world w(settings);
+    w.initializePhysics();
+
+    if (!approx(w.getPhysicsSystem().getGravityAcceleration(), 1.0f, 0.001f))
+        return fail(name, "gravity acceleration setting was not applied");
+
+    auto shape = makeBoxShape();
+    if (!shape)
+        return fail(name, "failed to create box shape");
+
+    auto with_gravity = w.registry.create();
+    w.registry.emplace<TransformComponent>(with_gravity, 0.0f, 10.0f, 0.0f);
+    auto& rb = w.registry.emplace<RigidBodyComponent>(with_gravity);
+    rb.mass = 1.0f;
+    rb.apply_gravity = true;
+
+    PhysicsSystem::PhysicsBodyDesc gravity_desc;
+    gravity_desc.mass = rb.mass;
+    gravity_desc.apply_gravity = true;
+    w.getPhysicsSystem().createDynamicBody(glm::vec3(0.0f, 10.0f, 0.0f), glm::vec3(0.0f), shape, with_gravity, gravity_desc);
+
+    for (int i = 0; i < 20; ++i)
+        w.getPhysicsSystem().stepPhysics(w.registry);
+
+    const float y = w.registry.get<TransformComponent>(with_gravity).position.y;
+    if (y <= 9.8f)
+        return fail(name, "custom gravity acceleration was ignored");
+    if (y >= 10.0f)
+        return fail(name, "body did not fall under custom gravity");
+
+    return pass(name);
+}
+
 static bool testPlayerBodyDoesNotUseJoltGravity()
 {
     const std::string name = "player body gravity ownership";
@@ -354,6 +395,8 @@ int main()
     bool ok = true;
     run("dynamic gravity flag");
     ok = testDynamicGravityFlag() && ok;
+    run("physics settings configure gravity");
+    ok = testPhysicsSettingsConfigureGravity() && ok;
     run("player body gravity ownership");
     ok = testPlayerBodyDoesNotUseJoltGravity() && ok;
     run("network-spawned player grounds on mesh");
