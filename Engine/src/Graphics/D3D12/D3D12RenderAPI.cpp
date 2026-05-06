@@ -691,8 +691,8 @@ void D3D12RenderAPI::resize(int width, int height)
     LOG_ENGINE_TRACE("[D3D12] Resize: {}x{} -> {}x{}", viewport_width, viewport_height, width, height);
     flushGPU();
 
-    viewport_width = width;
-    viewport_height = height;
+    const int old_width = viewport_width;
+    const int old_height = viewport_height;
 
     // Drop the client viewport's reference to the current back buffer —
     // ResizeBuffers requires zero outstanding refs to any swap-chain buffer.
@@ -708,15 +708,31 @@ void D3D12RenderAPI::resize(int width, int height)
     }
 
     // Resize swap chain
+    const UINT swapChainFlags = m_tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
     HRESULT hr = swapChain->ResizeBuffers(NUM_BACK_BUFFERS, width, height,
-                                           DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+                                           DXGI_FORMAT_R8G8B8A8_UNORM, swapChainFlags);
     if (FAILED(hr))
     {
         LOG_ENGINE_ERROR("Failed to resize swap chain buffers (HRESULT: 0x{:08X})", static_cast<unsigned>(hr));
-        device_lost = true;
+        viewport_width = old_width;
+        viewport_height = old_height;
+        if (createBackBufferRTVs())
+        {
+            m_backBufferIndex = swapChain->GetCurrentBackBufferIndex();
+            if (m_clientViewport)
+                m_clientViewport->rebindBackBuffer(m_backBuffers[m_backBufferIndex].Get(),
+                                                   m_backBufferRTVs[m_backBufferIndex]);
+        }
+        else
+        {
+            LOG_ENGINE_ERROR("Failed to restore back buffer RTVs after resize failure");
+            device_lost = true;
+        }
         return;
     }
 
+    viewport_width = width;
+    viewport_height = height;
     m_backBufferIndex = swapChain->GetCurrentBackBufferIndex();
 
     if (!createBackBufferRTVs())

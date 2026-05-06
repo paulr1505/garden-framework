@@ -344,7 +344,7 @@ void D3D12PostProcessGraphBuilder::addScenePasses(RenderGraph& graph, const Hand
             b.write(h.depth, RGResourceUsage::DepthStencilWrite);
             b.setSideEffect();
         },
-        [this, dh](RGContext& ctx) {
+        [this, dh, cfg](RGContext& ctx) {
             auto* d3dCtx = static_cast<D3D12RGContext*>(&ctx);
             auto& rgBackend = m_api->m_rgBackend;
 
@@ -362,7 +362,22 @@ void D3D12PostProcessGraphBuilder::addScenePasses(RenderGraph& graph, const Hand
             const D3D12_CPU_DESCRIPTOR_HANDLE dsv =
                 m_api->m_dsvAllocator.getCPU(m_depthDSVIndex);
 
+            ID3D12DescriptorHeap* heaps[] = { m_api->m_srvHeap.Get() };
+            d3dCtx->commandList->SetDescriptorHeaps(1, heaps);
+            m_api->bindDummyRootParams();
+            m_api->updateGlobalCBuffer();
+            m_api->global_cbuffer_dirty = false;
+
             d3dCtx->commandList->OMSetRenderTargets(3, rtvs, FALSE, &dsv);
+
+            D3D12_VIEWPORT vp{};
+            vp.Width = static_cast<float>(cfg.width);
+            vp.Height = static_cast<float>(cfg.height);
+            vp.MaxDepth = 1.0f;
+            D3D12_RECT scissor{ 0, 0, static_cast<LONG>(cfg.width), static_cast<LONG>(cfg.height) };
+            d3dCtx->commandList->RSSetViewports(1, &vp);
+            d3dCtx->commandList->RSSetScissorRects(1, &scissor);
+            d3dCtx->commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
             const float clear0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
             d3dCtx->commandList->ClearRenderTargetView(rtvs[0], clear0, 0, nullptr);
