@@ -287,42 +287,29 @@ static int runSighmake(const std::string& abs_buildscript,
 #endif
 }
 
-// Compile a generated solution. sighmake only emits project files — for
-// `garden generate-plugin` we want an end-to-end build so the editor finds
-// the DLL the host expects.
-//
-// Windows: invoke msbuild via `cmd /c` so the VS Developer environment
-//   variables (PATH includes msbuild.exe) are picked up. Falls back to the
-//   raw `msbuild` if available without VsDevCmd.
-// Unix: invoke `make` in the directory sighmake left build artifacts in.
-//   Plugin buildscripts are generated with `-g makefile` for this path.
-//
-// Returns 0 on success, non-zero on failure (or if the toolchain is missing).
-static int runMsbuild(const std::string& sln_path,
-                      const std::string& configuration,
-                      const std::string& platform)
+// Compile the generated build tree using Sighmake's own build driver so plugin
+// builds stay on the same toolchain discovery path as normal engine builds.
+static int runSighmakeBuild(const std::string& cwd,
+                            const std::string& configuration)
 {
 #ifdef _WIN32
-    // Quote the sln path; msbuild fails on paths with spaces otherwise.
-    std::string cmdline = "msbuild \"" + sln_path +
-                          "\" /nologo /m /verbosity:minimal" +
-                          " /p:Configuration=" + configuration +
-                          " /p:Platform=" + platform;
-    printf("  Running: %s\n", cmdline.c_str());
+    std::string cmdline = "sighmake --build . --config " + configuration + " --parallel 8";
+    printf("  Running: %s\n\n", cmdline.c_str());
 
-    STARTUPINFOA si = {}; si.cb = sizeof(si);
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
     PROCESS_INFORMATION pi = {};
 
     if (!CreateProcessA(
         nullptr, const_cast<char*>(cmdline.c_str()),
-        nullptr, nullptr, TRUE, 0, nullptr, nullptr,
+        nullptr, nullptr, TRUE,
+        0,
+        nullptr,
+        cwd.c_str(),
         &si, &pi))
     {
-        fprintf(stderr,
-            "Error: Failed to launch msbuild (error %lu).\n"
-            "  Run this command from a Visual Studio Developer Command Prompt,\n"
-            "  or open the generated .sln in Visual Studio and build manually.\n",
-            GetLastError());
+        fprintf(stderr, "Error: Failed to launch sighmake --build (error %lu)\n", GetLastError());
+        fprintf(stderr, "  Make sure sighmake is installed and on your PATH.\n");
         return 1;
     }
 
@@ -334,15 +321,46 @@ static int runMsbuild(const std::string& sln_path,
 
     if (exit_code != 0)
     {
-        fprintf(stderr, "\nError: msbuild failed (exit code %lu)\n", exit_code);
+        fprintf(stderr, "\nError: sighmake --build failed (exit code %lu)\n", exit_code);
         return (int)exit_code;
     }
     return 0;
 #else
-    (void)sln_path; (void)configuration; (void)platform;
-    // On Unix, we drive `make` from the sighmake build directory instead.
-    // Caller is expected to invoke a different code path; signal "not done".
-    return 1;
+    pid_t pid = fork();
+    if (pid < 0)
+    {
+        fprintf(stderr, "Error: fork() failed\n");
+        return 1;
+    }
+    if (pid == 0)
+    {
+        if (chdir(cwd.c_str()) != 0)
+            _exit(127);
+        const char* args[] = {
+            "sighmake",
+            "--build",
+            ".",
+            "--config",
+            configuration.c_str(),
+            "--parallel",
+            "8",
+            nullptr
+        };
+        execvp(args[0], const_cast<char* const*>(args));
+        fprintf(stderr, "Error: Failed to run sighmake --build. Make sure it is installed and on your PATH.\n");
+        _exit(127);
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    {
+        int code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+        fprintf(stderr, "\nError: sighmake --build failed (exit code %d)\n", code);
+        return code;
+    }
+    return 0;
 #endif
 }
 
@@ -881,47 +899,15 @@ static int cmdGeneratePlugin(const std::string& plugin_path)
     if (runSighmake(abs_buildscript, engine_path, plugin_dir) != 0)
         return 1;
 
-    // sighmake only emits project files. Compile them so the editor finds a
-    // DLL and not just a .slnx. Sighmake names the solution after the
-    // [solution] block (which conventionally matches the plugin name).
-#ifdef _WIN32
-    fs::path sln_path = fs::path(engine->path) / "build" / (plugin.name + "_.slnx");
-    if (!fs::exists(sln_path))
+    // Sighmake generation only emits project files; build from the plugin
+    // directory so Sighmake uses the generated plugin build tree.
+    printf("\nBuilding plugin (Debug) via sighmake...\n");
+    if (runSighmakeBuild(plugin_dir, "Debug") != 0)
     {
-        // Fall back to common alternate names; sighmake versions vary on
-        // whether they append the trailing '_'.
-        for (const std::string& candidate :
-             { plugin.name + ".slnx", plugin.name + "_.sln", plugin.name + ".sln" })
-        {
-            fs::path p = fs::path(engine->path) / "build" / candidate;
-            if (fs::exists(p)) { sln_path = p; break; }
-        }
+        fprintf(stderr, "  Build failed while running sighmake --build from '%s'.\n",
+                plugin_dir.c_str());
+        return 1;
     }
-
-    if (!fs::exists(sln_path))
-    {
-        fprintf(stderr,
-            "Warning: Generated solution not found under '%s\\build\\'.\n"
-            "  Open the .slnx in Visual Studio and build manually.\n",
-            engine->path.c_str());
-    }
-    else
-    {
-        printf("\nBuilding plugin (Debug|x64) via msbuild...\n");
-        if (runMsbuild(sln_path.string(), "Debug", "x64") != 0)
-        {
-            fprintf(stderr,
-                "  Build failed. Open '%s' in Visual Studio for full diagnostics.\n",
-                sln_path.string().c_str());
-            return 1;
-        }
-    }
-#else
-    // Unix: sighmake should have been told `-g makefile` to produce a Makefile
-    // we can drive. The current runSighmake doesn't pass -g, so on first cut
-    // we just print guidance — the project workflow does the same.
-    printf("\nNote: To compile, run `make` in the generated build directory.\n");
-#endif
 
     // Deploy manifest next to the built DLL.
     fs::path engine_plugins_dir = fs::path(engine->path) / "plugins";
@@ -929,6 +915,32 @@ static int cmdGeneratePlugin(const std::string& plugin_path)
     fs::create_directories(engine_plugins_dir, ec);
 
     std::string output_stem = plugin.output_dll.empty() ? plugin.name : plugin.output_dll;
+
+    // Verify the binary is where we expect before deploying the manifest. A
+    // manifest without a matching library makes the editor report a plugin
+    // that cannot actually be loaded.
+#ifdef _WIN32
+    const std::string dll_ext = ".dll";
+#elif defined(__APPLE__)
+    const std::string dll_ext = ".dylib";
+#else
+    const std::string dll_ext = ".so";
+#endif
+    fs::path expected_dll = engine_plugins_dir / (output_stem + dll_ext);
+    if (!fs::exists(expected_dll))
+    {
+        fprintf(stderr,
+            "Error: Expected plugin binary not found at '%s'.\n"
+            "  Check that your .buildscript sets 'outdir = ${ENGINE_PATH}/plugins'\n"
+            "  and 'name' matches output_dll ('%s').\n",
+            expected_dll.string().c_str(), output_stem.c_str());
+        return 1;
+    }
+    else
+    {
+        printf("  Built plugin: %s\n", expected_dll.string().c_str());
+    }
+
     fs::path deployed_manifest = engine_plugins_dir / (output_stem + ".gardenplugin");
 
     fs::copy_file(plugin_path, deployed_manifest,
@@ -941,28 +953,6 @@ static int cmdGeneratePlugin(const std::string& plugin_path)
     else
     {
         printf("  Deployed manifest: %s\n", deployed_manifest.string().c_str());
-    }
-
-    // Verify the DLL is where we expect.
-#ifdef _WIN32
-    const std::string dll_ext = ".dll";
-#elif defined(__APPLE__)
-    const std::string dll_ext = ".dylib";
-#else
-    const std::string dll_ext = ".so";
-#endif
-    fs::path expected_dll = engine_plugins_dir / (output_stem + dll_ext);
-    if (!fs::exists(expected_dll))
-    {
-        fprintf(stderr,
-            "Warning: Expected DLL not found at '%s'.\n"
-            "  Check that your .buildscript sets 'outdir = ${ENGINE_PATH}/plugins'\n"
-            "  and 'name' matches output_dll ('%s').\n",
-            expected_dll.string().c_str(), output_stem.c_str());
-    }
-    else
-    {
-        printf("  Built plugin: %s\n", expected_dll.string().c_str());
     }
 
     printf("\nPlugin '%s' built successfully.\n", plugin.name.c_str());
