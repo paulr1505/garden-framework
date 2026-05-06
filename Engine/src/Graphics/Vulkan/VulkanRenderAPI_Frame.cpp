@@ -180,15 +180,19 @@ void VulkanRenderAPI::prepareFrame()
         m_frameTimingPendingReadback[current_frame] = false;
     }
 
-    // Reset command buffer
-    vkResetCommandBuffer(command_buffers[current_frame], 0);
+    {
+        std::lock_guard<std::mutex> queueLock(m_queueSubmitMutex);
 
-    // Begin command buffer
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        // Reset command buffer
+        vkResetCommandBuffer(command_buffers[current_frame], 0);
 
-    vkBeginCommandBuffer(command_buffers[current_frame], &beginInfo);
+        // Begin command buffer
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+        vkBeginCommandBuffer(command_buffers[current_frame], &beginInfo);
+    }
 
     // Reset model matrix
     current_model_matrix = glm::mat4(1.0f);
@@ -527,7 +531,11 @@ void VulkanRenderAPI::present()
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = signalSemaphores;
 
-    VkResult submitResult = vkQueueSubmit(graphics_queue, 1, &submitInfo, in_flight_fences[current_frame]);
+    VkResult submitResult = VK_SUCCESS;
+    {
+        std::lock_guard<std::mutex> queueLock(m_queueSubmitMutex);
+        submitResult = vkQueueSubmit(graphics_queue, 1, &submitInfo, in_flight_fences[current_frame]);
+    }
     if (submitResult == VK_ERROR_DEVICE_LOST) {
         LOG_ENGINE_ERROR("[Vulkan] VK_ERROR_DEVICE_LOST on queue submit. Renderer shutting down.");
         device_lost = true;
@@ -545,7 +553,11 @@ void VulkanRenderAPI::present()
     presentInfo.pSwapchains = swapchains;
     presentInfo.pImageIndices = &current_image_index;
 
-    VkResult result = vkQueuePresentKHR(present_queue, &presentInfo);
+    VkResult result = VK_SUCCESS;
+    {
+        std::lock_guard<std::mutex> queueLock(m_queueSubmitMutex);
+        result = vkQueuePresentKHR(present_queue, &presentInfo);
+    }
 
     if (result == VK_ERROR_DEVICE_LOST) {
         LOG_ENGINE_ERROR("[Vulkan] VK_ERROR_DEVICE_LOST during present. Renderer shutting down.");

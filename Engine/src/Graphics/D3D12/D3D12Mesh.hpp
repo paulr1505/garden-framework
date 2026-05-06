@@ -3,6 +3,7 @@
 #include "Graphics/IGPUMesh.hpp"
 #include <d3d12.h>
 #include <wrl/client.h>
+#include <mutex>
 
 using Microsoft::WRL::ComPtr;
 
@@ -29,6 +30,7 @@ private:
     ID3D12Fence* uploadFence = nullptr;
     HANDLE uploadFenceEvent = nullptr;
     UINT64* uploadFenceValue = nullptr;
+    std::mutex* uploadMutex = nullptr;
 
     // Owner API — routes vertex/index buffer release through the deferred
     // queue so destruction during an open frame is safe. nullptr means
@@ -45,7 +47,7 @@ public:
     void setD3D12Handles(ID3D12Device* dev, ID3D12CommandQueue* queue,
                          ID3D12CommandAllocator* cmdAlloc, ID3D12GraphicsCommandList* cmdList,
                          ID3D12Fence* fence, HANDLE fenceEvent, UINT64* fenceVal,
-                         D3D12RenderAPI* owner);
+                         D3D12RenderAPI* owner, std::mutex* uploadMutex = nullptr);
 
     // IGPUMesh implementation
     void uploadMeshData(const vertex* vertices, size_t count) override;

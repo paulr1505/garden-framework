@@ -2,6 +2,7 @@
 
 #include "Graphics/IGPUMesh.hpp"
 #include <vulkan/vulkan.h>
+#include <mutex>
 
 // VMA forward declaration
 struct VmaAllocator_T;
@@ -30,6 +31,7 @@ private:
     VkQueue graphics_queue = VK_NULL_HANDLE;
     VkFence transfer_fence = VK_NULL_HANDLE;
     VkDeletionQueue* deletion_queue = nullptr;
+    std::mutex* queue_submit_mutex = nullptr;
 
 public:
     VulkanMesh();
@@ -37,7 +39,8 @@ public:
 
     // Set Vulkan handles (called by VulkanRenderAPI::createMesh)
     void setVulkanHandles(VkDevice dev, VmaAllocator alloc, VkCommandPool cmdPool, VkQueue queue,
-                          VkDeletionQueue* deletionQueue = nullptr);
+                          VkDeletionQueue* deletionQueue = nullptr,
+                          std::mutex* queueSubmitMutex = nullptr);
 
     // IGPUMesh implementation
     void uploadMeshData(const vertex* vertices, size_t count) override;

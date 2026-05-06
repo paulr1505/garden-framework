@@ -816,6 +816,9 @@ void D3D12RenderAPI::ensureCommandListOpen()
     m_copyQueue.releaseStagingBuffers();
 
     fc.commandAllocator->Reset();
+    if (fc.continuationCommandAllocator)
+        fc.continuationCommandAllocator->Reset();
+    fc.continuationAllocatorUsed = false;
     commandList->Reset(fc.commandAllocator.Get(), nullptr);
 
     m_backBufferIndex = swapChain->GetCurrentBackBufferIndex();
@@ -903,9 +906,15 @@ void D3D12RenderAPI::bindDummyRootParams()
     // [2] Diffuse texture SRV - bind default white texture
     if (defaultTexture != INVALID_TEXTURE)
     {
-        auto it = textures.find(defaultTexture);
-        if (it != textures.end())
-            commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(it->second.srvIndex));
+        UINT defaultSrv = UINT(-1);
+        {
+            std::lock_guard<std::mutex> lock(m_textureMutex);
+            auto it = textures.find(defaultTexture);
+            if (it != textures.end())
+                defaultSrv = it->second.srvIndex;
+        }
+        if (defaultSrv != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(defaultSrv));
     }
 
     // [3] Shadow map SRV (Texture2DArray)

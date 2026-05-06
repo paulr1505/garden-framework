@@ -2,8 +2,19 @@
 #include "Utils/Log.hpp"
 #include <stdio.h>
 
+namespace
+{
+    struct MutexUnlock
+    {
+        std::mutex& mutex;
+        ~MutexUnlock() { mutex.unlock(); }
+    };
+}
+
 VkCommandBuffer VulkanRenderAPI::beginSingleTimeCommands()
 {
+    m_queueSubmitMutex.lock();
+
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -23,6 +34,8 @@ VkCommandBuffer VulkanRenderAPI::beginSingleTimeCommands()
 
 void VulkanRenderAPI::endSingleTimeCommands(VkCommandBuffer commandBuffer)
 {
+    MutexUnlock unlock{m_queueSubmitMutex};
+
     vkEndCommandBuffer(commandBuffer);
 
     VkFenceCreateInfo fenceInfo{};

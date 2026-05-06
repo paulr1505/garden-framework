@@ -20,13 +20,15 @@ VulkanMesh::~VulkanMesh()
 }
 
 void VulkanMesh::setVulkanHandles(VkDevice dev, VmaAllocator alloc, VkCommandPool cmdPool, VkQueue queue,
-                                  VkDeletionQueue* deletionQueue)
+                                  VkDeletionQueue* deletionQueue,
+                                  std::mutex* queueSubmitMutex)
 {
     device = dev;
     allocator = alloc;
     command_pool = cmdPool;
     graphics_queue = queue;
     deletion_queue = deletionQueue;
+    queue_submit_mutex = queueSubmitMutex;
 
     // Create fence for transfer synchronization (avoids blocking entire queue)
     VkFenceCreateInfo fenceInfo{};
@@ -271,6 +273,10 @@ void VulkanMesh::updateMeshData(const vertex* vertices, size_t count, size_t off
     memcpy(stagingAllocInfoResult.pMappedData, vertices, bufferSize);
 
     // Copy from staging to GPU buffer at offset
+    std::unique_lock<std::mutex> queueLock;
+    if (queue_submit_mutex)
+        queueLock = std::unique_lock<std::mutex>(*queue_submit_mutex);
+
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -321,6 +327,10 @@ void VulkanMesh::updateMeshData(const vertex* vertices, size_t count, size_t off
 
 void VulkanMesh::copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size)
 {
+    std::unique_lock<std::mutex> queueLock;
+    if (queue_submit_mutex)
+        queueLock = std::unique_lock<std::mutex>(*queue_submit_mutex);
+
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;

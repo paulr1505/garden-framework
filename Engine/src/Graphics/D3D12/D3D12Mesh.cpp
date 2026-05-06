@@ -19,7 +19,7 @@ D3D12Mesh::~D3D12Mesh()
 void D3D12Mesh::setD3D12Handles(ID3D12Device* dev, ID3D12CommandQueue* queue,
                                 ID3D12CommandAllocator* cmdAlloc, ID3D12GraphicsCommandList* cmdList,
                                 ID3D12Fence* fence, HANDLE fenceEvent, UINT64* fenceVal,
-                                D3D12RenderAPI* owner)
+                                D3D12RenderAPI* owner, std::mutex* uploadMutexPtr)
 {
     device = dev;
     commandQueue = queue;
@@ -29,6 +29,7 @@ void D3D12Mesh::setD3D12Handles(ID3D12Device* dev, ID3D12CommandQueue* queue,
     uploadFenceEvent = fenceEvent;
     uploadFenceValue = fenceVal;
     ownerAPI = owner;
+    uploadMutex = uploadMutexPtr;
 }
 
 ComPtr<ID3D12Resource> D3D12Mesh::uploadToDefaultHeap(const void* data, size_t dataSize,
@@ -77,6 +78,10 @@ ComPtr<ID3D12Resource> D3D12Mesh::uploadToDefaultHeap(const void* data, size_t d
     // Use shared upload infrastructure if available, otherwise fall back to per-mesh
     if (uploadCmdAllocator && uploadCmdList && uploadFence && uploadFenceEvent && uploadFenceValue)
     {
+        std::unique_lock<std::mutex> uploadLock;
+        if (uploadMutex)
+            uploadLock = std::unique_lock<std::mutex>(*uploadMutex);
+
         uploadCmdAllocator->Reset();
         uploadCmdList->Reset(uploadCmdAllocator, nullptr);
 

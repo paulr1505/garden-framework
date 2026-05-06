@@ -386,6 +386,9 @@ private:
 
     // Shared staging buffer (guarded by staging_mutex for thread safety)
     std::mutex staging_mutex;
+    std::mutex m_textureMutex;
+    std::mutex m_descriptorPoolMutex;
+    std::mutex m_queueSubmitMutex;
     static constexpr VkDeviceSize STAGING_BUFFER_INITIAL_SIZE = 64 * 1024 * 1024; // 64 MB
     VkBuffer staging_buffer = VK_NULL_HANDLE;
     VmaAllocation staging_allocation = nullptr;
@@ -440,10 +443,10 @@ private:
         std::unordered_map<TextureHandle, VkDescriptorSet> texture_cache;
         bool limit_warned = false;
 
-        void reset(uint32_t frame_index) {
+        void reset(VkDevice device, uint32_t frame_index) {
             auto& s = state[frame_index];
             for (auto pool : s.pools) {
-                vkResetDescriptorPool(VK_NULL_HANDLE, pool, 0); // Device set at reset time
+                vkResetDescriptorPool(device, pool, 0);
             }
             s.current_pool = 0;
             s.sets_allocated_in_pool = 0;

@@ -96,6 +96,18 @@ size_t estimateStaticInstanceSavings(const RenderCommandBuffer& cmds)
     }
     return savedDraws;
 }
+
+struct VulkanParallelReplayItem
+{
+    VkBuffer vertexBuffer = VK_NULL_HANDLE;
+    VkBuffer indexBuffer = VK_NULL_HANDLE;
+    bool indexed = false;
+    uint32_t count = 0;
+    uint32_t first = 0;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    TextureHandle texture = INVALID_TEXTURE;
+    PerObjectUBO objectUBO{};
+};
 } // namespace
 
 void VulkanRenderAPI::uploadLightUniformBuffer(uint32_t frameIndex)
@@ -259,7 +271,7 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
         return INVALID_TEXTURE;
     }
 
-    // Use shared staging buffer (lock for thread safety)
+    // Use shared staging buffer and immediate command pool (lock for thread safety)
     {
         std::lock_guard<std::mutex> staging_lock(staging_mutex);
         ensureStagingBuffer(imageSize);
@@ -268,13 +280,13 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
         transitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_UNORM,
                              VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
         copyBufferToImage(staging_buffer, texture.image, width, height);
-    }
 
-    if (generate_mipmaps && texture.mipLevels > 1) {
-        generateMipmaps(texture.image, VK_FORMAT_R8G8B8A8_UNORM, width, height, texture.mipLevels);
-    } else {
-        transitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_UNORM,
-                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, texture.mipLevels);
+        if (generate_mipmaps && texture.mipLevels > 1) {
+            generateMipmaps(texture.image, VK_FORMAT_R8G8B8A8_UNORM, width, height, texture.mipLevels);
+        } else {
+            transitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_UNORM,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, texture.mipLevels);
+        }
     }
 
     // Create image view
@@ -303,8 +315,12 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
     texSamplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
     texture.sampler = sampler_cache.getOrCreate(texSamplerKey);
 
-    TextureHandle handle = next_texture_handle++;
-    textures[handle] = texture;
+    TextureHandle handle = INVALID_TEXTURE;
+    {
+        std::lock_guard<std::mutex> lock(m_textureMutex);
+        handle = next_texture_handle++;
+        textures[handle] = texture;
+    }
 
     LOG_ENGINE_TRACE("[Vulkan] loadTextureFromMemory: SUCCESS -> handle {} (mipLevels={})",
                      handle, texture.mipLevels);
@@ -343,13 +359,12 @@ TextureHandle VulkanRenderAPI::loadCompressedTexture(int width, int height, uint
         return INVALID_TEXTURE;
     }
 
-    // Transition entire image to TRANSFER_DST
-    transitionImageLayout(texture.image, vkFormat,
-                         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
-
-    // Upload each mip level via staging buffer
+    // Upload each mip level via staging buffer and immediate command pool.
     {
         std::lock_guard<std::mutex> staging_lock(staging_mutex);
+
+        transitionImageLayout(texture.image, vkFormat,
+                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
 
         for (int i = 0; i < mip_count; ++i) {
             VkDeviceSize mipSize = static_cast<VkDeviceSize>(mip_sizes[i]);
@@ -378,11 +393,11 @@ TextureHandle VulkanRenderAPI::loadCompressedTexture(int width, int height, uint
 
             endSingleTimeCommands(cmd);
         }
-    }
 
-    // Transition to shader read
-    transitionImageLayout(texture.image, vkFormat,
-                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, texture.mipLevels);
+        // Transition to shader read
+        transitionImageLayout(texture.image, vkFormat,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, texture.mipLevels);
+    }
 
     // Create image view
     texture.imageView = vkutil::createImageView(device, texture.image, vkFormat,
@@ -410,8 +425,12 @@ TextureHandle VulkanRenderAPI::loadCompressedTexture(int width, int height, uint
     texSamplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
     texture.sampler = sampler_cache.getOrCreate(texSamplerKey);
 
-    TextureHandle handle = next_texture_handle++;
-    textures[handle] = texture;
+    TextureHandle handle = INVALID_TEXTURE;
+    {
+        std::lock_guard<std::mutex> lock(m_textureMutex);
+        handle = next_texture_handle++;
+        textures[handle] = texture;
+    }
 
     LOG_ENGINE_TRACE("[Vulkan] loadCompressedTexture: handle {} ({}x{}, {} mips, format {})",
                      handle, width, height, mip_count, format);
@@ -430,9 +449,22 @@ void VulkanRenderAPI::unbindTexture()
 
 void VulkanRenderAPI::deleteTexture(TextureHandle texture)
 {
-    if (texture != INVALID_TEXTURE && textures.count(texture) > 0) {
-        VulkanTexture tex = textures[texture]; // copy by value for capture
-        textures.erase(texture);
+    if (texture == INVALID_TEXTURE)
+        return;
+
+    VulkanTexture tex;
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> lock(m_textureMutex);
+        auto it = textures.find(texture);
+        if (it != textures.end()) {
+            tex = it->second; // copy by value for capture
+            textures.erase(it);
+            found = true;
+        }
+    }
+
+    if (found) {
 
         // Defer destruction until GPU is done with the resource
         // Sampler is owned by sampler_cache, don't destroy it here
@@ -1050,6 +1082,16 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
 {
     if (cmds.empty() || !frame_started || device_lost) return;
 
+    const bool commandClassSupported = std::all_of(cmds.begin(), cmds.end(),
+        [](const DrawCommand& cmd) {
+            return !cmd.pso_key.shadow && !cmd.pso_key.depth_only;
+        });
+    if (!commandClassSupported)
+    {
+        replayCommandBuffer(cmds);
+        return;
+    }
+
     // Fall back to single-threaded for small buffers or if parallel infra not initialized
     if (cmds.size() < VK_PARALLEL_REPLAY_THRESHOLD ||
         m_threadCommandPools.empty() ||
@@ -1068,6 +1110,60 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
     }
 
     VkCommandBuffer cmd = command_buffers[current_frame];
+
+    std::vector<VulkanParallelReplayItem> replayItems;
+    replayItems.reserve(cmds.size());
+    for (const DrawCommand& drawCmd : cmds)
+    {
+        if (!drawCmd.gpu_mesh || !drawCmd.gpu_mesh->isUploaded()) continue;
+
+        VulkanMesh* vulkanMesh = dynamic_cast<VulkanMesh*>(drawCmd.gpu_mesh);
+        if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) continue;
+
+        VulkanParallelReplayItem item;
+        item.vertexBuffer = vulkanMesh->getVertexBuffer();
+        item.indexed = vulkanMesh->isIndexed();
+        item.count = drawCmd.vertex_count > 0
+            ? static_cast<uint32_t>(drawCmd.vertex_count)
+            : static_cast<uint32_t>(item.indexed ? vulkanMesh->getIndexCount() : vulkanMesh->getVertexCount());
+        item.first = static_cast<uint32_t>(drawCmd.vertex_count > 0 ? drawCmd.start_vertex : 0);
+        if (item.count == 0) continue;
+
+        if (item.indexed)
+        {
+            if (drawCmd.vertex_count > 0 && !checkIndexedDrawBounds(
+                    "replay-parallel-snapshot", vulkanMesh, item.first, item.count, "parallel_snapshot"))
+                continue;
+            item.indexBuffer = vulkanMesh->getIndexBuffer();
+            if (item.indexBuffer == VK_NULL_HANDLE) continue;
+        }
+
+        RenderState rs;
+        rs.blend_mode = drawCmd.pso_key.blend;
+        rs.cull_mode = drawCmd.pso_key.cull;
+        rs.lighting = drawCmd.pso_key.lighting;
+        item.pipeline = m_replayPipelineOverride ? m_replayPipelineOverride : selectPipeline(rs);
+        if (item.pipeline == VK_NULL_HANDLE) continue;
+
+        item.texture = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
+        item.objectUBO.model = drawCmd.model_matrix;
+        item.objectUBO.normalMatrix = drawCmd.normal_matrix;
+        item.objectUBO.color = drawCmd.color;
+        item.objectUBO.useTexture = drawCmd.use_texture ? 1 : 0;
+        item.objectUBO.alphaCutoff = drawCmd.alpha_cutoff;
+        item.objectUBO.metallic = drawCmd.metallic;
+        item.objectUBO.roughness = drawCmd.roughness;
+        item.objectUBO.emissive = drawCmd.emissive;
+        item.objectUBO.hasMetallicRoughnessMap = 0;
+        item.objectUBO.hasNormalMap = 0;
+        item.objectUBO.hasOcclusionMap = 0;
+        item.objectUBO.hasEmissiveMap = 0;
+
+        replayItems.push_back(item);
+    }
+
+    if (replayItems.empty())
+        return;
 
     // 1. Upload GlobalUBO (binding 0) — shared across all draws
     {
@@ -1135,9 +1231,9 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
     // 4. Calculate worker distribution (same chunking as D3D12)
     uint32_t max_workers = static_cast<uint32_t>(m_threadCommandPools.size());
     uint32_t num_workers = std::min(max_workers,
-        static_cast<uint32_t>((cmds.size() + VK_PARALLEL_REPLAY_THRESHOLD - 1) / VK_PARALLEL_REPLAY_THRESHOLD));
+        static_cast<uint32_t>((replayItems.size() + VK_PARALLEL_REPLAY_THRESHOLD - 1) / VK_PARALLEL_REPLAY_THRESHOLD));
     num_workers = std::max(num_workers, 1u);
-    size_t chunk_size = (cmds.size() + num_workers - 1) / num_workers;
+    size_t chunk_size = (replayItems.size() + num_workers - 1) / num_workers;
 
     // 5. Acquire per-worker pools (lock-free atomic compare-exchange)
     struct WorkerData {
@@ -1154,7 +1250,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
             break;
         }
         workers[w].start = w * chunk_size;
-        workers[w].end = std::min(workers[w].start + chunk_size, cmds.size());
+        workers[w].end = std::min(workers[w].start + chunk_size, replayItems.size());
     }
 
     if (num_workers == 0) {
@@ -1191,7 +1287,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
 
     for (uint32_t w = 0; w < num_workers; w++) {
         futures.push_back(std::async(std::launch::async,
-            [this, &cmds, &workers, w, frameIdx, inheritanceInfo, renderExtent,
+            [this, &replayItems, &workers, w, frameIdx, inheritanceInfo, renderExtent,
              pipelineLayout_cap, per_obj_mapped, per_obj_alignment_cap, per_obj_draw_idx]()
             {
                 auto* workerPool = workers[w].pool;
@@ -1230,23 +1326,10 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
 
                 // Process this worker's chunk
                 for (size_t i = workers[w].start; i < workers[w].end; i++) {
-                    const auto& drawCmd = cmds[i];
-                    if (!drawCmd.gpu_mesh || !drawCmd.gpu_mesh->isUploaded()) continue;
-
-                    VulkanMesh* vulkanMesh = dynamic_cast<VulkanMesh*>(drawCmd.gpu_mesh);
-                    if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) continue;
-
-                    // Select pipeline (thread-safe: reads immutable pipeline handles).
-                    // Honor the replay pipeline override (set by GBuffer pass).
-                    RenderState rs;
-                    rs.blend_mode = drawCmd.pso_key.blend;
-                    rs.cull_mode = drawCmd.pso_key.cull;
-                    rs.lighting = drawCmd.pso_key.lighting;
-                    VkPipeline selectedPipeline = m_replayPipelineOverride
-                        ? m_replayPipelineOverride : selectPipeline(rs);
-                    if (selectedPipeline != workerLastPipeline) {
-                        vkCmdBindPipeline(secCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selectedPipeline);
-                        workerLastPipeline = selectedPipeline;
+                    const auto& item = replayItems[i];
+                    if (item.pipeline != workerLastPipeline) {
+                        vkCmdBindPipeline(secCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, item.pipeline);
+                        workerLastPipeline = item.pipeline;
                     }
 
                     // Allocate per-object UBO (atomic bump allocator — thread-safe)
@@ -1254,26 +1337,11 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
                     if (drawIdx >= MAX_PER_OBJECT_DRAWS) continue;
                     uint32_t perObjectDynOffset = static_cast<uint32_t>(drawIdx * per_obj_alignment_cap);
 
-                    PerObjectUBO objUbo{};
-                    objUbo.model = drawCmd.model_matrix;
-                    objUbo.normalMatrix = drawCmd.normal_matrix;
-                    objUbo.color = drawCmd.color;
-                    objUbo.useTexture = drawCmd.use_texture ? 1 : 0;
-                    objUbo.alphaCutoff = drawCmd.alpha_cutoff;
-                    objUbo.metallic = drawCmd.metallic;
-                    objUbo.roughness = drawCmd.roughness;
-                    objUbo.emissive = drawCmd.emissive;
-                    objUbo.hasMetallicRoughnessMap = 0;
-                    objUbo.hasNormalMap = 0;
-                    objUbo.hasOcclusionMap = 0;
-                    objUbo.hasEmissiveMap = 0;
-
                     void* dst = static_cast<char*>(per_obj_mapped) + perObjectDynOffset;
-                    memcpy(dst, &objUbo, sizeof(objUbo));
+                    memcpy(dst, &item.objectUBO, sizeof(item.objectUBO));
 
                     // Get or allocate descriptor set (worker-local pool — no contention)
-                    TextureHandle texHandle = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
-                    VkDescriptorSet ds = workerGetOrAllocateDescriptorSet(*workerPool, frameIdx, texHandle);
+                    VkDescriptorSet ds = workerGetOrAllocateDescriptorSet(*workerPool, frameIdx, item.texture);
                     if (ds == VK_NULL_HANDLE) continue;
 
                     // Bind descriptor set with dynamic offset
@@ -1285,31 +1353,19 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
                     }
 
                     // Bind vertex buffer
-                    VkBuffer vb = vulkanMesh->getVertexBuffer();
-                    if (vb != workerLastVB) {
-                        VkBuffer vertexBuffers[] = {vb};
+                    if (item.vertexBuffer != workerLastVB) {
+                        VkBuffer vertexBuffers[] = {item.vertexBuffer};
                         VkDeviceSize offsets[] = {0};
                         vkCmdBindVertexBuffers(secCmd, 0, 1, vertexBuffers, offsets);
-                        workerLastVB = vb;
+                        workerLastVB = item.vertexBuffer;
                     }
 
                     // Draw
-                    if (vulkanMesh->isIndexed()) {
-                        vkCmdBindIndexBuffer(secCmd, vulkanMesh->getIndexBuffer(), 0, VK_INDEX_TYPE_UINT32);
-                        uint32_t count = drawCmd.vertex_count > 0
-                            ? static_cast<uint32_t>(drawCmd.vertex_count)
-                            : static_cast<uint32_t>(vulkanMesh->getIndexCount());
-                        uint32_t first = static_cast<uint32_t>(drawCmd.start_vertex);
-                        if (drawCmd.vertex_count > 0 && !checkIndexedDrawBounds(
-                                "replay-parallel", vulkanMesh, first, count, "parallel_replay"))
-                            continue;
-                        vkCmdDrawIndexed(secCmd, count, 1, first, 0, 0);
+                    if (item.indexed) {
+                        vkCmdBindIndexBuffer(secCmd, item.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                        vkCmdDrawIndexed(secCmd, item.count, 1, item.first, 0, 0);
                     } else {
-                        uint32_t count = drawCmd.vertex_count > 0
-                            ? static_cast<uint32_t>(drawCmd.vertex_count)
-                            : static_cast<uint32_t>(vulkanMesh->getVertexCount());
-                        uint32_t first = static_cast<uint32_t>(drawCmd.start_vertex);
-                        vkCmdDraw(secCmd, count, 1, first, 0);
+                        vkCmdDraw(secCmd, item.count, 1, item.first, 0);
                     }
                 }
 
@@ -1328,7 +1384,7 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
         secondaryBuffers.push_back(workers[w].pool->secondary_buffer[frameIdx]);
 
     vkCmdExecuteCommands(cmd, static_cast<uint32_t>(secondaryBuffers.size()), secondaryBuffers.data());
-    m_lastFrameStats.backend_draw_calls += cmds.size();
+    m_lastFrameStats.backend_draw_calls += replayItems.size();
 
     // 11. End secondary render pass
     vkCmdEndRenderPass(cmd);
@@ -1524,7 +1580,8 @@ void VulkanRenderAPI::setPointAndSpotLights(const LightCBuffer& lights)
 IGPUMesh* VulkanRenderAPI::createMesh()
 {
     VulkanMesh* mesh = new VulkanMesh();
-    mesh->setVulkanHandles(device, vma_allocator, command_pool, graphics_queue, &deletion_queue);
+    mesh->setVulkanHandles(device, vma_allocator, command_pool, graphics_queue,
+                           &deletion_queue, &m_queueSubmitMutex);
     return mesh;
 }
 

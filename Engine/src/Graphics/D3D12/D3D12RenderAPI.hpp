@@ -68,7 +68,9 @@ private:
     struct FrameContext
     {
         ComPtr<ID3D12CommandAllocator> commandAllocator;
+        ComPtr<ID3D12CommandAllocator> continuationCommandAllocator;
         UINT64 fenceValue = 0;
+        bool continuationAllocatorUsed = false;
     };
     FrameContext m_frameContexts[NUM_FRAMES_IN_FLIGHT];
     UINT m_frameIndex = 0;
@@ -146,6 +148,7 @@ private:
 
     // Command list pool for parallel replay (multicore rendering)
     D3D12CommandListPool m_commandListPool;
+    std::mutex m_textureMutex;
 
     // Upload command infrastructure (for meshes and init-time buffer creation)
     ComPtr<ID3D12CommandAllocator> m_uploadCmdAllocator;
@@ -153,6 +156,7 @@ private:
     ComPtr<ID3D12Fence> m_uploadFence;
     HANDLE m_uploadFenceEvent = nullptr;
     UINT64 m_uploadFenceValue = 0;
+    std::mutex m_uploadCommandMutex;
 
     // Matrix management
     glm::mat4 projection_matrix = glm::mat4(1.0f);

@@ -73,6 +73,19 @@ namespace
             }
         }
     };
+
+    struct D3D12ParallelReplayItem
+    {
+        D3D12_VERTEX_BUFFER_VIEW vbv = {};
+        D3D12_INDEX_BUFFER_VIEW ibv = {};
+        bool indexed = false;
+        UINT draw_count = 0;
+        UINT first_vertex = 0;
+        ID3D12PipelineState* pso = nullptr;
+        D3D12_GPU_DESCRIPTOR_HANDLE diffuse_srv = {};
+        bool has_diffuse_srv = false;
+        D3D12PerObjectCBuffer object_cb = {};
+    };
 }
 
 // ============================================================================
@@ -318,9 +331,13 @@ TextureHandle D3D12RenderAPI::loadTextureFromMemory(const uint8_t* pixels, int w
     tex.width = width;
     tex.height = height;
 
-    TextureHandle handle = nextTextureHandle++;
+    TextureHandle handle = INVALID_TEXTURE;
     UINT srvIdx = tex.srvIndex;
-    textures[handle] = std::move(tex);
+    {
+        std::lock_guard<std::mutex> lock(m_textureMutex);
+        handle = nextTextureHandle++;
+        textures[handle] = std::move(tex);
+    }
     LOG_ENGINE_TRACE("[D3D12] Loaded texture #{}: {}x{}, {} mips, SRV index {}",
                       handle, width, height, mipLevels, srvIdx);
     return handle;
@@ -482,8 +499,12 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
     tex.width = width;
     tex.height = height;
 
-    TextureHandle handle = nextTextureHandle++;
-    textures[handle] = std::move(tex);
+    TextureHandle handle = INVALID_TEXTURE;
+    {
+        std::lock_guard<std::mutex> lock(m_textureMutex);
+        handle = nextTextureHandle++;
+        textures[handle] = std::move(tex);
+    }
     LOG_ENGINE_TRACE("[D3D12] loadCompressedTexture: handle {} ({}x{}, {} mips, format {})",
                       handle, width, height, mip_count, format);
     return handle;
@@ -493,10 +514,17 @@ void D3D12RenderAPI::bindTexture(TextureHandle texture)
 {
     if (texture == currentBoundTexture) return;
 
-    auto it = textures.find(texture);
-    if (it != textures.end())
+    UINT srvIndex = UINT(-1);
     {
-        commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(it->second.srvIndex));
+        std::lock_guard<std::mutex> lock(m_textureMutex);
+        auto it = textures.find(texture);
+        if (it != textures.end())
+            srvIndex = it->second.srvIndex;
+    }
+
+    if (srvIndex != UINT(-1))
+    {
+        commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(srvIndex));
         currentBoundTexture = texture;
     }
     else
@@ -514,17 +542,28 @@ void D3D12RenderAPI::unbindTexture()
 
 void D3D12RenderAPI::deleteTexture(TextureHandle texture)
 {
-    auto it = textures.find(texture);
-    if (it != textures.end())
+    D3D12Texture tex;
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> lock(m_textureMutex);
+        auto it = textures.find(texture);
+        if (it != textures.end())
+        {
+            tex = std::move(it->second);
+            textures.erase(it);
+            found = true;
+        }
+    }
+
+    if (found)
     {
         // Flush GPU once to ensure it's done with this texture, then release.
         // Callers deleting many textures should batch their own flushGPU() call
         // and use the internal erase path to avoid repeated stalls.
         if (!device_lost)
             flushGPU();
-        if (it->second.srvIndex != UINT(-1))
-            m_srvAllocator.free(it->second.srvIndex);
-        textures.erase(it);
+        if (tex.srvIndex != UINT(-1))
+            m_srvAllocator.free(tex.srvIndex);
     }
 }
 
@@ -695,6 +734,8 @@ void D3D12RenderAPI::flushAndReopenCommandList()
 {
     if (!m_commandListOpen || device_lost) return;
 
+    FrameContext& fc = m_frameContexts[m_frameIndex];
+
     flushBarriers();
     commandList->Close();
     m_commandListOpen = false;
@@ -702,10 +743,26 @@ void D3D12RenderAPI::flushAndReopenCommandList()
     ID3D12CommandList* lists[] = { commandList.Get() };
     commandQueue->ExecuteCommandLists(1, lists);
 
+    if (!fc.continuationCommandAllocator)
+    {
+        LOG_ENGINE_ERROR("[D3D12] Missing continuation command allocator; command list cannot be reopened safely");
+        device_lost = true;
+        return;
+    }
+
+    if (fc.continuationAllocatorUsed)
+    {
+        m_fenceValue++;
+        commandQueue->Signal(m_fence.Get(), m_fenceValue);
+        waitForFence(m_fenceValue);
+        fc.continuationCommandAllocator->Reset();
+    }
+
     // Reopen immediately for subsequent work (postamble, UI, etc.)
-    // Don't wait for GPU -- we just need the CPU-side cmd list open again.
-    // The command allocator is still valid for this frame.
-    commandList->Reset(m_frameContexts[m_frameIndex].commandAllocator.Get(), nullptr);
+    // Use the per-frame continuation allocator; the preamble allocator has
+    // just been submitted and cannot be reset until the frame fence retires.
+    commandList->Reset(fc.continuationCommandAllocator.Get(), nullptr);
+    fc.continuationAllocatorUsed = true;
     m_commandListOpen = true;
 
     // Restore essential state on the reopened command list
@@ -754,6 +811,16 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
 {
     if (cmds.empty() || device_lost) return;
 
+    const bool commandClassSupported = std::all_of(cmds.begin(), cmds.end(),
+        [](const DrawCommand& cmd) {
+            return !cmd.pso_key.shadow && !cmd.pso_key.depth_only;
+        });
+    if (!commandClassSupported)
+    {
+        replayCommandBuffer(cmds);
+        return;
+    }
+
     // Fall back to single-threaded for small buffers or if pool isn't initialized
     if (cmds.size() < D3D12_PARALLEL_REPLAY_THRESHOLD || m_commandListPool.capacity() == 0)
     {
@@ -793,16 +860,93 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
         return;
     }
 
+    std::unique_lock<std::mutex> textureLock(m_textureMutex);
+    const TextureHandle defaultTex = defaultTexture;
+
+    std::vector<D3D12ParallelReplayItem> replayItems;
+    replayItems.reserve(cmds.size());
+    auto resolveTextureSRV = [&](TextureHandle requested) -> D3D12_GPU_DESCRIPTOR_HANDLE
+    {
+        auto it = textures.find(requested);
+        if (it != textures.end() && it->second.srvIndex != UINT(-1))
+            return m_srvAllocator.getGPU(it->second.srvIndex);
+
+        if (defaultTex != INVALID_TEXTURE && requested != defaultTex)
+        {
+            auto defaultIt = textures.find(defaultTex);
+            if (defaultIt != textures.end() && defaultIt->second.srvIndex != UINT(-1))
+                return m_srvAllocator.getGPU(defaultIt->second.srvIndex);
+        }
+        return {};
+    };
+
+    for (const DrawCommand& cmd : cmds)
+    {
+        if (!cmd.gpu_mesh || !cmd.gpu_mesh->isUploaded()) continue;
+
+        D3D12Mesh* gpuMesh = asD3D12Mesh(cmd.gpu_mesh);
+        if (!gpuMesh || !gpuMesh->isUploaded()) continue;
+
+        D3D12ParallelReplayItem item;
+        item.vbv = gpuMesh->getVertexBufferView();
+        item.indexed = gpuMesh->isIndexed();
+        item.draw_count = static_cast<UINT>(cmd.vertex_count > 0
+            ? cmd.vertex_count
+            : (item.indexed ? gpuMesh->getIndexCount() : gpuMesh->getVertexCount()));
+        item.first_vertex = static_cast<UINT>(cmd.vertex_count > 0 ? cmd.start_vertex : 0);
+        if (item.draw_count == 0) continue;
+        if (item.indexed)
+            item.ibv = gpuMesh->getIndexBufferView();
+
+        item.object_cb.model = cmd.model_matrix;
+        item.object_cb.normalMatrix = cmd.normal_matrix;
+        item.object_cb.color = cmd.color;
+        item.object_cb.useTexture = cmd.use_texture ? 1 : 0;
+        item.object_cb.alphaCutoff = cmd.alpha_cutoff;
+        item.object_cb.metallic = cmd.metallic;
+        item.object_cb.roughness = cmd.roughness;
+        item.object_cb.emissive = cmd.emissive;
+        item.object_cb.hasMetallicRoughnessMap = 0;
+        item.object_cb.hasNormalMap = 0;
+        item.object_cb.hasOcclusionMap = 0;
+        item.object_cb.hasEmissiveMap = 0;
+
+        item.pso = m_replayPSOOverride;
+        if (!item.pso)
+        {
+            RenderState rs;
+            rs.blend_mode = cmd.pso_key.blend;
+            rs.cull_mode = cmd.pso_key.cull;
+            rs.lighting = cmd.pso_key.lighting;
+            rs.alpha_test = cmd.pso_key.alpha_test;
+            item.pso = selectPSO(rs, !cmd.pso_key.lighting);
+        }
+        if (!item.pso) continue;
+
+        TextureHandle texToBind = cmd.use_texture && cmd.texture != INVALID_TEXTURE
+            ? cmd.texture : defaultTex;
+        if (texToBind != INVALID_TEXTURE)
+        {
+            item.diffuse_srv = resolveTextureSRV(texToBind);
+            item.has_diffuse_srv = item.diffuse_srv.ptr != 0;
+        }
+
+        replayItems.push_back(item);
+    }
+
+    if (replayItems.empty())
+        return;
+
     // Flush main command list (preamble complete)
     flushAndReopenCommandList();
 
     // Determine chunk count based on available command lists
     uint32_t max_workers = m_commandListPool.capacity();
     uint32_t num_workers = std::min(max_workers,
-        static_cast<uint32_t>((cmds.size() + D3D12_PARALLEL_REPLAY_THRESHOLD - 1) / D3D12_PARALLEL_REPLAY_THRESHOLD));
+        static_cast<uint32_t>((replayItems.size() + D3D12_PARALLEL_REPLAY_THRESHOLD - 1) / D3D12_PARALLEL_REPLAY_THRESHOLD));
     num_workers = std::max(num_workers, 1u);
 
-    size_t chunk_size = (cmds.size() + num_workers - 1) / num_workers;
+    size_t chunk_size = (replayItems.size() + num_workers - 1) / num_workers;
 
     // Acquire worker command lists
     struct WorkerData
@@ -822,12 +966,12 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
             break;
         }
         workers[w].start = w * chunk_size;
-        workers[w].end = std::min(workers[w].start + chunk_size, cmds.size());
+        workers[w].end = std::min(workers[w].start + chunk_size, replayItems.size());
     }
 
     if (num_workers == 0)
     {
-        // Pool exhausted, fall back
+        textureLock.unlock();
         replayCommandBuffer(cmds);
         return;
     }
@@ -837,11 +981,9 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     auto srvHeap = m_srvHeap.Get();
     auto rtState = m_currentRT;
     auto shadowSRVIdx = m_shadowSRVIndex;
-    auto defaultTex = defaultTexture;
     auto lightCBAddr = m_cachedLightCBAddr;
     auto* uploadBuf = &m_cbUploadBuffer[m_frameIndex];
     auto* srvAlloc = &m_srvAllocator;
-    auto* textureMap = &textures;
     auto pbrMetallicRoughnessSRV = m_defaultMetallicRoughnessTexture.srvIndex;
     auto pbrNormalSRV = m_defaultNormalTexture.srvIndex;
     auto pbrOcclusionSRV = m_defaultOcclusionTexture.srvIndex;
@@ -854,7 +996,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
     for (uint32_t w = 0; w < num_workers; w++)
     {
         futures.push_back(std::async(std::launch::async,
-            [&, w, rootSig, srvHeap, rtState, shadowSRVIdx, defaultTex, globalCBAddr, lightCBAddr, uploadBuf, srvAlloc, textureMap,
+            [&, w, rootSig, srvHeap, rtState, shadowSRVIdx, globalCBAddr, lightCBAddr, uploadBuf, srvAlloc,
              pbrMetallicRoughnessSRV, pbrNormalSRV, pbrOcclusionSRV, pbrEmissiveSRV]()
             {
                 auto* cmdList = workers[w].entry->cmdList.Get();
@@ -889,80 +1031,36 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
 
                 // Replay this worker's chunk of commands
                 ID3D12PipelineState* workerLastPSO = nullptr;
-                TextureHandle workerLastTex = INVALID_TEXTURE;
-                ReplayBindingCache bindingCache;
+                D3D12_GPU_DESCRIPTOR_HANDLE workerLastSrv = {};
 
                 for (size_t i = workers[w].start; i < workers[w].end; i++)
                 {
-                    const auto& cmd = cmds[i];
-                    if (!cmd.gpu_mesh || !cmd.gpu_mesh->isUploaded()) continue;
-
-                    D3D12Mesh* gpuMesh = asD3D12Mesh(cmd.gpu_mesh);
-                    if (!gpuMesh || !gpuMesh->isUploaded()) continue;
-
-                    D3D12PerObjectCBuffer objCB = {};
-                    objCB.model = cmd.model_matrix;
-                    objCB.normalMatrix = cmd.normal_matrix;
-                    objCB.color = cmd.color;
-                    objCB.useTexture = cmd.use_texture ? 1 : 0;
-                    objCB.alphaCutoff = cmd.alpha_cutoff;
-                    objCB.metallic = cmd.metallic;
-                    objCB.roughness = cmd.roughness;
-                    objCB.emissive = cmd.emissive;
-                    objCB.hasMetallicRoughnessMap = 0;
-                    objCB.hasNormalMap = 0;
-                    objCB.hasOcclusionMap = 0;
-                    objCB.hasEmissiveMap = 0;
-
-                    auto objAddr = uploadBuf->allocate(sizeof(objCB), &objCB);
+                    const auto& item = replayItems[i];
+                    auto objAddr = uploadBuf->allocate(sizeof(item.object_cb), &item.object_cb);
                     if (objAddr == 0) continue;
                     cmdList->SetGraphicsRootConstantBufferView(1, objAddr);
 
-                    // Select PSO (or honor caller-set GBuffer override).
-                    ID3D12PipelineState* pso = m_replayPSOOverride;
-                    if (!pso)
+                    if (item.pso != workerLastPSO)
                     {
-                        RenderState rs;
-                        rs.blend_mode = cmd.pso_key.blend;
-                        rs.cull_mode = cmd.pso_key.cull;
-                        rs.lighting = cmd.pso_key.lighting;
-                        rs.alpha_test = cmd.pso_key.alpha_test;
-                        bool unlit = !cmd.pso_key.lighting;
-                        pso = selectPSO(rs, unlit);
-                    }
-                    if (pso != workerLastPSO)
-                    {
-                        cmdList->SetPipelineState(pso);
-                        workerLastPSO = pso;
+                        cmdList->SetPipelineState(item.pso);
+                        workerLastPSO = item.pso;
                     }
 
-                    // Bind texture
-                    TextureHandle texToBind = cmd.use_texture && cmd.texture != INVALID_TEXTURE
-                                              ? cmd.texture : defaultTex;
-                    if (texToBind != workerLastTex && texToBind != INVALID_TEXTURE)
+                    if (item.has_diffuse_srv && item.diffuse_srv.ptr != workerLastSrv.ptr)
                     {
-                        auto it = textureMap->find(texToBind);
-                        if (it != textureMap->end())
-                            cmdList->SetGraphicsRootDescriptorTable(2, srvAlloc->getGPU(it->second.srvIndex));
-                        workerLastTex = texToBind;
+                        cmdList->SetGraphicsRootDescriptorTable(2, item.diffuse_srv);
+                        workerLastSrv = item.diffuse_srv;
                     }
 
-                    bindingCache.bindMesh(cmdList, gpuMesh);
-                    if (gpuMesh->isIndexed())
+                    cmdList->IASetVertexBuffers(0, 1, &item.vbv);
+                    if (item.indexed)
                     {
-                        if (cmd.vertex_count > 0)
-                            cmdList->DrawIndexedInstanced(static_cast<UINT>(cmd.vertex_count), 1,
-                                                          static_cast<UINT>(cmd.start_vertex), 0, 0);
-                        else
-                            cmdList->DrawIndexedInstanced(static_cast<UINT>(gpuMesh->getIndexCount()), 1, 0, 0, 0);
+                        cmdList->IASetIndexBuffer(&item.ibv);
+                        cmdList->DrawIndexedInstanced(item.draw_count, 1, item.first_vertex, 0, 0);
                     }
                     else
                     {
-                        if (cmd.vertex_count > 0)
-                            cmdList->DrawInstanced(static_cast<UINT>(cmd.vertex_count), 1,
-                                                    static_cast<UINT>(cmd.start_vertex), 0);
-                        else
-                            cmdList->DrawInstanced(static_cast<UINT>(gpuMesh->getVertexCount()), 1, 0, 0);
+                        cmdList->DrawInstanced(item.draw_count, 1, item.first_vertex, 0);
                     }
                 }
 
@@ -990,12 +1088,17 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
         commandQueue->Signal(m_fence.Get(), m_fenceValue);
         m_commandListPool.setLastSubmissionFence(m_fenceValue);
     }
+    textureLock.unlock();
+
+    m_lastFrameStats.submitted_draw_commands += cmds.size();
+    m_lastFrameStats.backend_draw_calls += replayItems.size();
 }
 
 void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 {
     if (cmds.empty() || device_lost) return;
 
+    m_lastFrameStats.submitted_draw_commands += cmds.size();
     ReplayBindingCache bindingCache;
     D3D12_GPU_VIRTUAL_ADDRESS lastLightCBAddr = 0;
 
@@ -1054,6 +1157,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             // Restore opaque shadow PSO for next draw
             if (cmd.pso_key.alpha_test && m_psoShadowAlphaTest)
                 commandList->SetPipelineState(m_psoShadow.Get());
+            m_lastFrameStats.backend_draw_calls++;
             continue;
         }
 
@@ -1099,6 +1203,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                 else
                     commandList->DrawInstanced(static_cast<UINT>(gpuMesh->getVertexCount()), 1, 0, 0);
             }
+            m_lastFrameStats.backend_draw_calls++;
             continue;
         }
 
@@ -1168,6 +1273,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             else
                 commandList->DrawInstanced(static_cast<UINT>(gpuMesh->getVertexCount()), 1, 0, 0);
         }
+        m_lastFrameStats.backend_draw_calls++;
     }
 }
 
@@ -1404,6 +1510,6 @@ IGPUMesh* D3D12RenderAPI::createMesh()
                           m_uploadCmdAllocator.Get(), m_uploadCmdList.Get(),
                           m_uploadFence.Get(), m_uploadFenceEvent,
                           &m_uploadFenceValue,
-                          this);
+                          this, &m_uploadCommandMutex);
     return mesh;
 }

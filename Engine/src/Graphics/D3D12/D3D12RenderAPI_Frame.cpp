@@ -125,6 +125,10 @@ setup_done:
     currentBoundTexture = INVALID_TEXTURE;
     in_depth_prepass = false;
     m_cachedLightCBAddr = 0;
+    m_lastFrameStats.submitted_draw_commands = 0;
+    m_lastFrameStats.backend_draw_calls = 0;
+    m_lastFrameStats.instanced_batches = 0;
+    m_lastFrameStats.instanced_instances = 0;
 
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 

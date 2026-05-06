@@ -415,15 +415,17 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
 
     // Binding 1: Diffuse texture
     VkDescriptorImageInfo imageInfo{};
-    if (texture != INVALID_TEXTURE && textures.count(texture) > 0) {
-        const VulkanTexture& tex = textures[texture];
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imageInfo.imageView = tex.imageView;
-        imageInfo.sampler = tex.sampler;
-    } else {
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imageInfo.imageView = default_texture.imageView;
-        imageInfo.sampler = default_texture.sampler;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    {
+        std::lock_guard<std::mutex> lock(m_textureMutex);
+        auto it = textures.find(texture);
+        if (texture != INVALID_TEXTURE && it != textures.end()) {
+            imageInfo.imageView = it->second.imageView;
+            imageInfo.sampler = it->second.sampler;
+        } else {
+            imageInfo.imageView = default_texture.imageView;
+            imageInfo.sampler = default_texture.sampler;
+        }
     }
 
     // Binding 2: Shadow map (fall back to default depth texture + comparison sampler)
@@ -712,9 +714,11 @@ VkDescriptorSet VulkanRenderAPI::workerAllocateFromPool(PerThreadCommandPool& wo
     if (state.sets_allocated_in_pool >= SETS_PER_POOL) {
         state.current_pool++;
         if (state.current_pool >= state.pools.size()) {
-            // Thread-safe: vkCreateDescriptorPool only requires VkDevice externally
-            // synchronized, and pool creation doesn't mutate shared device state
-            VkDescriptorPool newPool = createPerDrawDescriptorPool();
+            VkDescriptorPool newPool = VK_NULL_HANDLE;
+            {
+                std::lock_guard<std::mutex> lock(m_descriptorPoolMutex);
+                newPool = createPerDrawDescriptorPool();
+            }
             if (newPool == VK_NULL_HANDLE) return VK_NULL_HANDLE;
             state.pools.push_back(newPool);
         }

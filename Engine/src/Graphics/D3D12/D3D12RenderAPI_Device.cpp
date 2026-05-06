@@ -272,11 +272,20 @@ bool D3D12RenderAPI::createFrameResources()
             D3D12_COMMAND_LIST_TYPE_DIRECT,
             IID_PPV_ARGS(m_frameContexts[i].commandAllocator.GetAddressOf()));
         if (FAILED(hr)) return false;
+
+        hr = device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(m_frameContexts[i].continuationCommandAllocator.GetAddressOf()));
+        if (FAILED(hr)) return false;
+
         m_frameContexts[i].fenceValue = 0;
+        m_frameContexts[i].continuationAllocatorUsed = false;
 
         wchar_t name[64];
         swprintf_s(name, L"Frame CmdAllocator %d", i);
         SetD3D12DebugName(m_frameContexts[i].commandAllocator.Get(), name);
+        swprintf_s(name, L"Frame Continuation CmdAllocator %d", i);
+        SetD3D12DebugName(m_frameContexts[i].continuationCommandAllocator.Get(), name);
     }
 
     // Create the command list (initially closed)
