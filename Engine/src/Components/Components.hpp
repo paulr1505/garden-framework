@@ -52,6 +52,46 @@ struct MeshComponent {
     // No reflect() — contains non-reflectable shared_ptr data, handled with custom UI
 };
 
+struct TerrainComponent {
+    std::string heightmap_path;
+    std::string albedo_path;
+    float width = 64.0f;
+    float depth = 64.0f;
+    float height_scale = 8.0f;
+    float height_offset = 0.0f;
+    int sample_step = 1;
+    bool gpu_displacement = true;
+    bool generate_collision = true;
+    float friction = 0.7f;
+    float restitution = 0.0f;
+
+    static void reflect(Reflector<TerrainComponent>& r) {
+        r.display("Terrain").category("Rendering");
+        r.field<&TerrainComponent::heightmap_path>("heightmap_path")
+            .tooltip("Grayscale heightmap asset path").category("Assets").assetPath();
+        r.field<&TerrainComponent::albedo_path>("albedo_path")
+            .tooltip("Terrain albedo texture asset path").category("Assets").assetPath();
+        r.field<&TerrainComponent::width>("width")
+            .tooltip("Terrain width in local X units").drag(0.1f).range(0.001f, 100000.0f).category("Size");
+        r.field<&TerrainComponent::depth>("depth")
+            .tooltip("Terrain depth in local Z units").drag(0.1f).range(0.001f, 100000.0f).category("Size");
+        r.field<&TerrainComponent::height_scale>("height_scale")
+            .tooltip("Height range applied to normalized heightmap samples").drag(0.1f).range(-100000.0f, 100000.0f).category("Height");
+        r.field<&TerrainComponent::height_offset>("height_offset")
+            .tooltip("Offset added to generated terrain heights").drag(0.1f).range(-100000.0f, 100000.0f).category("Height");
+        r.field<&TerrainComponent::sample_step>("sample_step")
+            .tooltip("Heightmap texel stride used for generated terrain vertices").drag(1.0f).range(1.0f, 1024.0f).category("Sampling");
+        r.field<&TerrainComponent::gpu_displacement>("gpu_displacement")
+            .tooltip("Use backend vertex displacement when supported").category("Rendering");
+        r.field<&TerrainComponent::generate_collision>("generate_collision")
+            .tooltip("Create a static collision mesh from the heightmap").category("Physics");
+        r.field<&TerrainComponent::friction>("friction")
+            .tooltip("Terrain collision friction").drag(0.01f).range(0.0f, 10.0f).category("Physics");
+        r.field<&TerrainComponent::restitution>("restitution")
+            .tooltip("Terrain collision bounciness").drag(0.01f).range(0.0f, 1.0f).category("Physics");
+    }
+};
+
 enum class BodyMotionType : int
 {
     Dynamic = 0,

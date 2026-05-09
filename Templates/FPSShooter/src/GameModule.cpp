@@ -348,6 +348,14 @@ GAME_API void gardenGameUpdate(float delta_time)
         }
     }
 
+    if (g_player_controller && input_manager)
+    {
+        const float mouse_dx = input_manager->get_mouse_delta_x();
+        const float mouse_dy = input_manager->get_mouse_delta_y();
+        if (mouse_dx != 0.0f || mouse_dy != 0.0f)
+            g_player_controller->handleMouseMotion(mouse_dy, mouse_dx);
+    }
+
     // Update kill feed timers
     for (auto it = g_kill_feed.begin(); it != g_kill_feed.end(); ) {
         it->timer -= delta_time;

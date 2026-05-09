@@ -904,17 +904,17 @@ void D3D12RenderAPI::bindDummyRootParams()
     commandList->SetGraphicsRootConstantBufferView(4, dummyAddr);
 
     // [2] Diffuse texture SRV - bind default white texture
+    UINT defaultTextureSrv = UINT(-1);
     if (defaultTexture != INVALID_TEXTURE)
     {
-        UINT defaultSrv = UINT(-1);
         {
             std::lock_guard<std::mutex> lock(m_textureMutex);
             auto it = textures.find(defaultTexture);
             if (it != textures.end())
-                defaultSrv = it->second.srvIndex;
+                defaultTextureSrv = it->second.srvIndex;
         }
-        if (defaultSrv != UINT(-1))
-            commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(defaultSrv));
+        if (defaultTextureSrv != UINT(-1))
+            commandList->SetGraphicsRootDescriptorTable(2, m_srvAllocator.getGPU(defaultTextureSrv));
     }
 
     // [3] Shadow map SRV (Texture2DArray)
@@ -945,6 +945,10 @@ void D3D12RenderAPI::bindDummyRootParams()
         commandList->SetGraphicsRootDescriptorTable(9, m_srvAllocator.getGPU(m_pointLightsSRVIndex[m_frameIndex]));
     if (m_spotLightsSRVIndex[m_frameIndex] != UINT(-1))
         commandList->SetGraphicsRootDescriptorTable(10, m_srvAllocator.getGPU(m_spotLightsSRVIndex[m_frameIndex]));
+
+    // [11] Heightmap texture SRV - default white gives a stable zero-disabled binding.
+    if (defaultTextureSrv != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(11, m_srvAllocator.getGPU(defaultTextureSrv));
 }
 
 std::vector<char> D3D12RenderAPI::readShaderBinary(const std::string& filepath)

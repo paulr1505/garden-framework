@@ -38,8 +38,6 @@ bool RmlRenderer_VK::Init(VulkanRenderAPI* renderAPI)
 
     if (!CreateDescriptorResources())
         return false;
-    if (!CreatePipelines())
-        return false;
 
     return true;
 }
@@ -68,8 +66,13 @@ void RmlRenderer_VK::Shutdown()
     m_textures.clear();
 
     if (m_sampler) { vkDestroySampler(m_device, m_sampler, nullptr); m_sampler = VK_NULL_HANDLE; }
-    if (m_pipelineTextured) { vkDestroyPipeline(m_device, m_pipelineTextured, nullptr); m_pipelineTextured = VK_NULL_HANDLE; }
-    if (m_pipelineColor) { vkDestroyPipeline(m_device, m_pipelineColor, nullptr); m_pipelineColor = VK_NULL_HANDLE; }
+    for (auto& [renderPass, pipelines] : m_pipelines)
+    {
+        (void)renderPass;
+        if (pipelines.textured) vkDestroyPipeline(m_device, pipelines.textured, nullptr);
+        if (pipelines.color) vkDestroyPipeline(m_device, pipelines.color, nullptr);
+    }
+    m_pipelines.clear();
     if (m_pipelineLayout) { vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr); m_pipelineLayout = VK_NULL_HANDLE; }
     if (m_textureSetLayout) { vkDestroyDescriptorSetLayout(m_device, m_textureSetLayout, nullptr); m_textureSetLayout = VK_NULL_HANDLE; }
     if (m_descriptorPool) { vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr); m_descriptorPool = VK_NULL_HANDLE; }
@@ -90,6 +93,7 @@ void RmlRenderer_VK::SetViewport(int width, int height)
 void RmlRenderer_VK::BeginFrame()
 {
     m_currentCmdBuffer = m_renderAPI->getCurrentCommandBuffer();
+    m_currentRenderPass = m_renderAPI->getCurrentRmlRenderPass();
 }
 
 std::vector<char> RmlRenderer_VK::ReadShaderFile(const std::string& path)
@@ -202,8 +206,11 @@ bool RmlRenderer_VK::CreateDescriptorResources()
     return true;
 }
 
-bool RmlRenderer_VK::CreatePipelines()
+bool RmlRenderer_VK::CreatePipelines(VkRenderPass renderPass)
 {
+    if (renderPass == VK_NULL_HANDLE)
+        return false;
+
     // Load shaders
     auto vertCode = ReadShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/rmlui.vert.spv"));
     auto fragTexCode = ReadShaderFile(EnginePaths::resolveEngineAsset("../assets/shaders/compiled/vulkan/rmlui_texture.frag.spv"));
@@ -231,18 +238,21 @@ bool RmlRenderer_VK::CreatePipelines()
     pushRange.offset = 0;
     pushRange.size = sizeof(RmlUBO);
 
-    VkPipelineLayoutCreateInfo layoutInfo = {};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layoutInfo.setLayoutCount = 1;
-    layoutInfo.pSetLayouts = &m_textureSetLayout;
-    layoutInfo.pushConstantRangeCount = 1;
-    layoutInfo.pPushConstantRanges = &pushRange;
-    if (vkCreatePipelineLayout(m_device, &layoutInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS)
+    if (m_pipelineLayout == VK_NULL_HANDLE)
     {
-        vkDestroyShaderModule(m_device, vertModule, nullptr);
-        vkDestroyShaderModule(m_device, fragTexModule, nullptr);
-        vkDestroyShaderModule(m_device, fragColModule, nullptr);
-        return false;
+        VkPipelineLayoutCreateInfo layoutInfo = {};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &m_textureSetLayout;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &pushRange;
+        if (vkCreatePipelineLayout(m_device, &layoutInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS)
+        {
+            vkDestroyShaderModule(m_device, vertModule, nullptr);
+            vkDestroyShaderModule(m_device, fragTexModule, nullptr);
+            vkDestroyShaderModule(m_device, fragColModule, nullptr);
+            return false;
+        }
     }
 
     // Vertex input
@@ -352,10 +362,11 @@ bool RmlRenderer_VK::CreatePipelines()
     pipelineInfo.pDepthStencilState = &depthStencil;
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = m_pipelineLayout;
-    pipelineInfo.renderPass = m_renderAPI->getRenderPass();
+    pipelineInfo.renderPass = renderPass;
     pipelineInfo.subpass = 0;
 
-    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipelineTextured) != VK_SUCCESS)
+    PipelineSet pipelines{};
+    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipelines.textured) != VK_SUCCESS)
     {
         LOG_ENGINE_ERROR("Failed to create RmlUi textured pipeline");
         vkDestroyShaderModule(m_device, vertModule, nullptr);
@@ -374,9 +385,11 @@ bool RmlRenderer_VK::CreatePipelines()
     VkPipelineShaderStageCreateInfo stages_col[] = { vertStage, fragColStage };
     pipelineInfo.pStages = stages_col;
 
-    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipelineColor) != VK_SUCCESS)
+    if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipelines.color) != VK_SUCCESS)
     {
         LOG_ENGINE_ERROR("Failed to create RmlUi color pipeline");
+        if (pipelines.textured)
+            vkDestroyPipeline(m_device, pipelines.textured, nullptr);
         vkDestroyShaderModule(m_device, vertModule, nullptr);
         vkDestroyShaderModule(m_device, fragTexModule, nullptr);
         vkDestroyShaderModule(m_device, fragColModule, nullptr);
@@ -388,6 +401,7 @@ bool RmlRenderer_VK::CreatePipelines()
     vkDestroyShaderModule(m_device, fragTexModule, nullptr);
     vkDestroyShaderModule(m_device, fragColModule, nullptr);
 
+    m_pipelines[renderPass] = pipelines;
     return true;
 }
 
@@ -446,10 +460,20 @@ Rml::CompiledGeometryHandle RmlRenderer_VK::CompileGeometry(Rml::Span<const Rml:
 void RmlRenderer_VK::RenderGeometry(Rml::CompiledGeometryHandle handle, Rml::Vector2f translation, Rml::TextureHandle texture)
 {
     auto it = m_geometries.find((uintptr_t)handle);
-    if (it == m_geometries.end() || !m_currentCmdBuffer)
+    if (it == m_geometries.end() || !m_currentCmdBuffer || m_currentRenderPass == VK_NULL_HANDLE)
         return;
 
     const auto& geo = it->second;
+    auto pipeline_it = m_pipelines.find(m_currentRenderPass);
+    if (pipeline_it == m_pipelines.end())
+    {
+        if (!CreatePipelines(m_currentRenderPass))
+            return;
+        pipeline_it = m_pipelines.find(m_currentRenderPass);
+        if (pipeline_it == m_pipelines.end())
+            return;
+    }
+    const PipelineSet& pipelines = pipeline_it->second;
 
     // Build UBO data
     RmlUBO ubo = {};
@@ -467,14 +491,17 @@ void RmlRenderer_VK::RenderGeometry(Rml::CompiledGeometryHandle handle, Rml::Vec
 
     if (m_transformEnabled)
     {
-        // Multiply ortho * m_transform, result in row-major for Slang
+        // RmlUi's transform matrix uses the same memory convention as the
+        // D3D12 backend. Keep the multiply/indexing aligned so CSS transforms
+        // such as the HUD crosshair do not explode into clipped fullscreen tris.
+        const float* a = ortho;
         const float* b = m_transform.data();
         for (int i = 0; i < 4; i++)
             for (int j = 0; j < 4; j++)
             {
-                ubo.transform[i * 4 + j] = 0.0f;
+                ubo.transform[j * 4 + i] = 0.0f;
                 for (int k = 0; k < 4; k++)
-                    ubo.transform[i * 4 + j] += ortho[i * 4 + k] * b[k * 4 + j];
+                    ubo.transform[j * 4 + i] += a[k * 4 + i] * b[j * 4 + k];
             }
     }
     else
@@ -509,9 +536,9 @@ void RmlRenderer_VK::RenderGeometry(Rml::CompiledGeometryHandle handle, Rml::Vec
 
     // Bind pipeline
     if (texture)
-        vkCmdBindPipeline(m_currentCmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineTextured);
+        vkCmdBindPipeline(m_currentCmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.textured);
     else
-        vkCmdBindPipeline(m_currentCmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineColor);
+        vkCmdBindPipeline(m_currentCmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines.color);
 
     // Upload UBO via push constants (per-draw, recorded inline in command buffer)
     vkCmdPushConstants(m_currentCmdBuffer, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(RmlUBO), &ubo);

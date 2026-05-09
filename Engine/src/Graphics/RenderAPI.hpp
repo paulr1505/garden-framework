@@ -240,6 +240,7 @@ public:
     virtual bool isSSAOEnabled() const { return false; }
     virtual void setSSAORadius(float radius) { (void)radius; }
     virtual void setSSAOIntensity(float intensity) { (void)intensity; }
+    virtual bool supportsHeightmapDisplacement() const { return false; }
 
     // Autorelease pool support (Metal needs ObjC temporaries drained each frame)
     // Default implementation just calls the function directly.
@@ -252,6 +253,8 @@ public:
     virtual uint64_t getViewportTextureID() { return 0; }
     // Resize the offscreen viewport render target
     virtual void setViewportSize(int width, int height) { (void)width; (void)height; }
+    // Whether the current offscreen scene target should composite game RmlUi.
+    virtual void setSceneRmlEnabled(bool enabled) { (void)enabled; }
     // Render ImGui draw data to the screen backbuffer
     virtual void renderUI() {}
 

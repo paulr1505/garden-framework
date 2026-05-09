@@ -762,21 +762,23 @@ void EditorApp::run()
             EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuSimulation);
             if (m_state.isSimulationRunning())
             {
-                if (m_network_pie_active)
+                if (m_game_module_active)
                 {
-                    // Network PIE: tick server (if listen server), then all clients
-                    if (m_state.network_pie.net_mode == PIENetMode::ListenServer)
+                    // Project DLL PIE: tick server when networked, then Player 1.
+                    if (m_network_pie_active && m_state.network_pie.net_mode == PIENetMode::ListenServer)
                         m_game_module.serverUpdate(m_delta_time);
 
-                    // Tick Player 1 (main editor viewport)
                     m_game_module.update(m_delta_time);
                     m_renderer.markBVHDirty();
 
-                    // Tick additional in-editor PIE clients
-                    for (auto& inst : m_pie_clients)
+                    if (m_network_pie_active)
                     {
-                        if (inst && inst->initialized)
-                            inst->game_module.update(m_delta_time);
+                        // Tick additional in-editor PIE clients
+                        for (auto& inst : m_pie_clients)
+                        {
+                            if (inst && inst->initialized)
+                                inst->game_module.update(m_delta_time);
+                        }
                     }
                 }
                 else if (m_game_sim)
@@ -827,6 +829,7 @@ void EditorApp::run()
         render_api->setViewportSize(m_viewport.width, m_viewport.height);
         const bool render_main_viewport =
             m_show_viewport && m_viewport.is_visible && m_viewport.width > 0 && m_viewport.height > 0;
+        render_api->setSceneRmlEnabled(m_state.isSimulationActive());
         {
             EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuViewport);
             if (render_main_viewport)
@@ -836,6 +839,7 @@ void EditorApp::run()
         // --- Phase 1b: Render additional PIE client viewports ---
         {
             EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuPIEViewports);
+            render_api->setSceneRmlEnabled(false);
             for (auto& inst : m_pie_clients)
             {
                 if (!inst || !inst->initialized || !inst->viewport)
@@ -864,6 +868,7 @@ void EditorApp::run()
         // --- Phase 1c: Render prefab editor 3D previews ---
         {
             EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuPrefabPreviews);
+            render_api->setSceneRmlEnabled(false);
             m_prefab_editor.renderAllPreviews();
         }
 
@@ -901,7 +906,11 @@ void EditorApp::run()
             EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuUIBuild);
             ImGuiManager::get().newFrame();
             ImGuizmo::BeginFrame();
-            RmlUiManager::get().beginFrame();
+            const std::string api_name = render_api->getAPIName();
+            if (api_name != "D3D12" && api_name != "Vulkan")
+            {
+                RmlUiManager::get().beginFrame();
+            }
 
             renderDockspace();
 
@@ -1335,6 +1344,7 @@ void EditorApp::beginPlay()
                 else
                 {
                     m_game_module.onLevelLoaded();
+                    m_game_module_active = true;
                     m_network_pie_active = true;
 
                     // Launch additional players based on run mode
@@ -1473,6 +1483,7 @@ void EditorApp::beginPlay()
             else
             {
                 m_game_module.onLevelLoaded();
+                m_game_module_active = true;
                 m_network_pie_active = true;
 
                 // Launch additional players based on run mode
@@ -1551,10 +1562,40 @@ void EditorApp::beginPlay()
 
     if (!use_network_pie && !m_network_pie_active)
     {
-        // ---- Standalone path: existing GameSimulation ----
+        // ---- Standalone project-DLL path: run the same game code as Game.exe ----
         m_game_input_manager = std::make_shared<InputManager>();
-        m_game_sim = std::make_unique<GameSimulation>(&m_world, m_game_input_manager);
-        m_game_sim->initialize();
+
+        if (!dll_path.empty() && std::filesystem::exists(dll_path) && m_game_module.load(dll_path))
+        {
+            m_client_services = {};
+            m_client_services.game_world      = &m_world;
+            m_client_services.render_api       = m_app.getRenderAPI();
+            m_client_services.input_manager    = m_game_input_manager.get();
+            m_client_services.reflection       = &m_reflection;
+            m_client_services.application      = &m_app;
+            m_client_services.level_manager    = &m_level_manager;
+            m_client_services.api_version      = GARDEN_MODULE_API_VERSION;
+
+            m_game_module.registerComponents(&m_reflection);
+            if (m_game_module.init(&m_client_services))
+            {
+                m_game_module.onLevelLoaded();
+                m_game_module_active = true;
+                LOG_ENGINE_INFO("--- PIE: Standalone game module initialized ---");
+            }
+            else
+            {
+                LOG_ENGINE_ERROR("Standalone game module initialization failed - falling back to engine simulation");
+                m_game_module.unload();
+            }
+        }
+
+        if (!m_game_module_active)
+        {
+            // No project DLL is available; fall back to the engine-only simulation.
+            m_game_sim = std::make_unique<GameSimulation>(&m_world, m_game_input_manager);
+            m_game_sim->initialize();
+        }
     }
 
     // Enter playing state (mouse stays free until user clicks viewport)
@@ -1573,39 +1614,42 @@ void EditorApp::stopPlay()
 
     LOG_ENGINE_INFO("--- PIE: Stopping play mode ---");
 
-    // 1. Tear down network PIE or standalone simulation
-    if (m_network_pie_active)
+    // 1. Tear down project DLL PIE or standalone simulation
+    if (m_game_module_active)
     {
-        // Kill spawned processes first (clients disconnect before server shuts down)
-        m_pie_processes.killAll();
+        if (m_network_pie_active)
+        {
+            // Kill spawned processes first (clients disconnect before server shuts down)
+            m_pie_processes.killAll();
 
-        // Tear down additional in-editor PIE client instances. Make sure no
-        // dangling pointer remains in the API: if a PIE viewport is currently
-        // bound, clear it before destroying any of them.
-        if (auto* api = m_app.getRenderAPI())
-        {
-            api->waitForGPU();
-            api->setEditorViewport(m_main_viewport.get());
-        }
-        for (auto& inst : m_pie_clients)
-        {
-            if (inst && inst->initialized)
+            // Tear down additional in-editor PIE client instances. Make sure no
+            // dangling pointer remains in the API: if a PIE viewport is currently
+            // bound, clear it before destroying any of them.
+            if (auto* api = m_app.getRenderAPI())
             {
-                inst->game_module.shutdown();
-                inst->game_module.unload();
-                inst->viewport.reset();
-                inst->client_world.resetWorld();
-                inst->initialized = false;
+                api->waitForGPU();
+                api->setEditorViewport(m_main_viewport.get());
             }
+            for (auto& inst : m_pie_clients)
+            {
+                if (inst && inst->initialized)
+                {
+                    inst->game_module.shutdown();
+                    inst->game_module.unload();
+                    inst->viewport.reset();
+                    inst->client_world.resetWorld();
+                    inst->initialized = false;
+                }
+            }
+            m_pie_clients.clear();
+            m_focused_pie_client = -1;
         }
-        m_pie_clients.clear();
-        m_focused_pie_client = -1;
 
         // Shutdown Player 1 client
         m_game_module.shutdown();
 
         // Shutdown server (only for listen server — dedicated server was a separate process)
-        if (m_state.network_pie.net_mode == PIENetMode::ListenServer)
+        if (m_network_pie_active && m_state.network_pie.net_mode == PIENetMode::ListenServer)
         {
             m_game_module.serverShutdown();
             m_server_world.resetWorld();
@@ -1613,9 +1657,10 @@ void EditorApp::stopPlay()
 
         m_game_module.unload();
         m_game_input_manager.reset();
+        m_game_module_active = false;
         m_network_pie_active = false;
 
-        LOG_ENGINE_INFO("Network PIE shutdown complete");
+        LOG_ENGINE_INFO("Project DLL PIE shutdown complete");
     }
     else
     {
@@ -1714,7 +1759,9 @@ void EditorApp::ejectFromPlay()
     SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
 
     // Sync editor camera to current game camera so user starts flying from there
-    if (m_game_sim)
+    if (m_game_module_active)
+        m_editor_cam.cam = m_world.world_camera;
+    else if (m_game_sim)
         m_editor_cam.cam = m_game_sim->getActiveCamera();
 
     LOG_ENGINE_INFO("PIE: Ejected (editor camera, simulation continues)");
@@ -1737,7 +1784,7 @@ camera& EditorApp::chooseRenderCamera()
     {
     case PlayMode::Playing:
     case PlayMode::Paused:
-        if (m_network_pie_active)
+        if (m_game_module_active)
             return m_world.world_camera; // game DLL updates world_camera
         if (m_game_sim)
             return m_game_sim->getActiveCamera();

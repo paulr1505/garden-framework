@@ -388,6 +388,7 @@ private:
     BarrierBatch m_barrierBatch;
 
     void bindDummyRootParams();
+    void bindHeightmapTexture(TextureHandle texture);
 
     ID3D12PipelineState* selectPSO(const RenderState& state, bool unlit);
     D3D12_GPU_VIRTUAL_ADDRESS getGlobalCBufferAddress();
@@ -398,10 +399,18 @@ private:
                                                      float alphaCutoff = 0.0f,
                                                      float metallic = 0.0f,
                                                      float roughness = 0.5f,
-                                                     const glm::vec3& emissive = glm::vec3(0.0f));
+                                                     const glm::vec3& emissive = glm::vec3(0.0f),
+                                                     bool useHeightmapDisplacement = false,
+                                                     float heightmapHeightScale = 1.0f,
+                                                     float heightmapHeightOffset = 0.0f,
+                                                     const glm::vec2& heightmapTexelSize = glm::vec2(0.0f));
     void updateGlobalCBuffer();
     void updatePerObjectCBuffer(const glm::vec3& color, bool useTexture, float alphaCutoff = 0.0f);
-    void updateShadowCBuffer(const glm::mat4& lightSpace, const glm::mat4& model);
+    void updateShadowCBuffer(const glm::mat4& lightSpace, const glm::mat4& model,
+                             bool useHeightmapDisplacement = false,
+                             float heightmapHeightScale = 1.0f,
+                             float heightmapHeightOffset = 0.0f,
+                             const glm::vec2& heightmapTexelSize = glm::vec2(0.0f));
 
     // CSM helper methods
     void calculateCascadeSplits(float nearPlane, float farPlane);
@@ -492,6 +501,7 @@ public:
     void setDeferredEnabled(bool enabled) override;
     bool isDeferredEnabled() const override { return m_useDeferred; }
     bool isDeferredActive() const override;
+    bool supportsHeightmapDisplacement() const override { return true; }
     void submitDeferredOpaqueCommands(const RenderCommandBuffer& cmds) override;
     void submitDeferredTransparentCommands(const RenderCommandBuffer& cmds) override;
     void uploadLightBuffers(const GPUPointLight* pts, int ptCount,
@@ -524,6 +534,7 @@ public:
     void endSceneRender() override;
     uint64_t getViewportTextureID() override;
     void setViewportSize(int width, int height) override;
+    void setSceneRmlEnabled(bool enabled) override { m_sceneRmlEnabled = enabled; }
     void renderUI() override;
 
     // New SceneViewport-based editor path. Caller owns the viewport.
@@ -575,6 +586,7 @@ private:
     // Ownership lives in the caller (EditorApp). The API just stores a
     // non-owning pointer that's set via setEditorViewport().
     D3D12SceneViewport* m_editorViewport = nullptr;
+    bool m_sceneRmlEnabled = false;
     // Cached size of the current scene-render target (editor viewport when
     // editor mode, PIE viewport during PIE render, window size otherwise).
     // Used to size the API-wide SSAO / shadow-mask buffers.

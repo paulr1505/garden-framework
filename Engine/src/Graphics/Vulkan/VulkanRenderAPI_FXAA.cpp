@@ -1,4 +1,5 @@
 #include "VulkanRenderAPI.hpp"
+#include "UI/RmlUiManager.h"
 #include "Utils/Log.hpp"
 #include "Utils/EnginePaths.hpp"
 #include <stdio.h>
@@ -573,6 +574,7 @@ void VulkanRenderAPI::renderFXAAPass(
     VkPipeline pipeline,
     uint32_t width, uint32_t height,
     bool enableSSAO, bool enableShadowMask,
+    bool renderRml,
     bool renderImGui)
 {
     // Update FXAA UBO
@@ -614,6 +616,13 @@ void VulkanRenderAPI::renderFXAAPass(
     VkDeviceSize offsets[] = { 0 };
     vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
     vkCmdDraw(cmd, 6, 1, 0, 0);
+
+    if (renderRml) {
+        m_currentRmlRenderPass = renderPass;
+        RmlUiManager::get().beginFrame(static_cast<int>(width), static_cast<int>(height));
+        RmlUiManager::get().render();
+        m_currentRmlRenderPass = VK_NULL_HANDLE;
+    }
 
     if (renderImGui) {
         ImDrawData* draw_data = ImGui::GetDrawData();

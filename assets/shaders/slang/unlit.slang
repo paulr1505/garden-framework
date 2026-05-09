@@ -52,7 +52,7 @@ struct InstanceData
     float4x4 model;
     float4x4 normalMatrix;
 };
-[[vk::binding(12, 0)]]StructuredBuffer<InstanceData> instanceData : register(t8);
+[[vk::binding(12, 0)]]StructuredBuffer<InstanceData> instanceData : register(t9);
 #endif
 
 struct VSInput

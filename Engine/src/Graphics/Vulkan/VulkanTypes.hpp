@@ -120,6 +120,12 @@ struct PerObjectUBO {
     int hasNormalMap;
     int hasOcclusionMap;
     int hasEmissiveMap;
+    int useHeightmapDisplacement;
+    float heightmapHeightScale;
+    float heightmapHeightOffset;
+    float _heightmapPad0;
+    glm::vec2 heightmapTexelSize;
+    glm::vec2 _heightmapPad1;
     int useInstanceData;
     uint32_t instanceBase;
     glm::vec2 _instancePad;
@@ -134,6 +140,29 @@ struct VulkanInstanceData {
 struct ShadowUBO {
     glm::mat4 lightSpaceMatrix;
     glm::mat4 model;
+};
+
+struct VulkanHeightmapDisplacementData {
+    int useHeightmapDisplacement;
+    float heightmapHeightScale;
+    float heightmapHeightOffset;
+    float _heightmapPad0;
+    glm::vec2 heightmapTexelSize;
+    glm::vec2 _heightmapPad1;
+};
+
+struct VulkanShadowPushConstants {
+    glm::mat4 lightSpaceMatrix;
+    glm::mat4 model;
+    VulkanHeightmapDisplacementData heightmap;
+};
+
+struct VulkanShadowAlphaPushConstants {
+    glm::mat4 lightSpaceMatrix;
+    glm::mat4 model;
+    VulkanHeightmapDisplacementData heightmap;
+    float alphaCutoff;
+    glm::vec3 _alphaPad;
 };
 
 // FXAA UBO (matches Slang shader FXAACB)

@@ -451,7 +451,7 @@ void VulkanPostProcessGraphBuilder::recordTonemapping(RGContext&, const Handles&
     api->renderFXAAPass(api->command_buffers[api->current_frame],
                         m_fxaaRP, m_fxaaFB, m_fxaaPipeline,
                         cfg.width, cfg.height,
-                        cfg.wantSSAO, cfg.wantShadowMask, cfg.renderImGui);
+                        cfg.wantSSAO, cfg.wantShadowMask, cfg.renderRml, cfg.renderImGui);
 }
 
 void VulkanPostProcessGraphBuilder::addScenePasses(RenderGraph& graph, const Handles& h, const Config& cfg)

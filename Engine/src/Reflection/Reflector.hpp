@@ -82,6 +82,14 @@ public:
     PropertyBuilder& widget(EPropertyWidget w)
     { m_props[m_index].meta.widget = w; return *this; }
 
+    PropertyBuilder& assetPath()
+    {
+        auto& prop = m_props[m_index];
+        prop.type = EPropertyType::AssetPath;
+        prop.meta.widget = EPropertyWidget::AssetPath;
+        return *this;
+    }
+
     PropertyBuilder& display(std::string name)
     { m_props[m_index].meta.display_name = std::move(name); return *this; }
 

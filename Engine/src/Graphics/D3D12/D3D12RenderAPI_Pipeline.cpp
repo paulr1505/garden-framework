@@ -22,8 +22,9 @@ bool D3D12RenderAPI::createRootSignature()
     // [8] Descriptor table: SRV t5 (emissive texture)
     // [9] Descriptor table: SRV t6 (point lights StructuredBuffer)
     // [10] Descriptor table: SRV t7 (spot lights StructuredBuffer)
+    // [11] Descriptor table: SRV t8 (heightmap texture)
 
-    D3D12_ROOT_PARAMETER rootParams[11] = {};
+    D3D12_ROOT_PARAMETER rootParams[12] = {};
 
     // [0] Root CBV b0
     rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -139,6 +140,18 @@ bool D3D12RenderAPI::createRootSignature()
     rootParams[10].DescriptorTable.pDescriptorRanges = &srvRange7;
     rootParams[10].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+    // [11] Descriptor table: SRV t8 (heightmap texture)
+    D3D12_DESCRIPTOR_RANGE srvRange8 = {};
+    srvRange8.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    srvRange8.NumDescriptors = 1;
+    srvRange8.BaseShaderRegister = 8;
+    srvRange8.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    rootParams[11].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParams[11].DescriptorTable.NumDescriptorRanges = 1;
+    rootParams[11].DescriptorTable.pDescriptorRanges = &srvRange8;
+    rootParams[11].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
     // Static samplers
     D3D12_STATIC_SAMPLER_DESC staticSamplers[6] = {};
 
@@ -179,7 +192,7 @@ bool D3D12RenderAPI::createRootSignature()
     }
 
     D3D12_ROOT_SIGNATURE_DESC rsDesc = {};
-    rsDesc.NumParameters = 11;
+    rsDesc.NumParameters = 12;
     rsDesc.pParameters = rootParams;
     rsDesc.NumStaticSamplers = 6;
     rsDesc.pStaticSamplers = staticSamplers;

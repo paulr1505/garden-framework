@@ -113,12 +113,24 @@ struct alignas(16) D3D12PerObjectCBuffer
     int hasNormalMap;
     int hasOcclusionMap;
     int hasEmissiveMap;
+    int useHeightmapDisplacement;
+    float heightmapHeightScale;
+    float heightmapHeightOffset;
+    float _heightmapPad0;
+    glm::vec2 heightmapTexelSize;
+    glm::vec2 _heightmapPad1;
 };
 
 struct alignas(16) D3D12ShadowCBuffer
 {
     glm::mat4 lightSpaceMatrix;
     glm::mat4 model;
+    int useHeightmapDisplacement;
+    float heightmapHeightScale;
+    float heightmapHeightOffset;
+    float _heightmapPad0;
+    glm::vec2 heightmapTexelSize;
+    glm::vec2 _heightmapPad1;
 };
 
 struct alignas(16) D3D12SkyboxCBuffer

@@ -17,7 +17,7 @@ bool VulkanRenderAPI::createDescriptorPool()
     // Each set needs UBOs, samplers, light SSBOs, and the instance-data SSBO.
     uint32_t globalSets = MAX_FRAMES_IN_FLIGHT;
 
-    std::array<VkDescriptorPoolSize, 4> globalPoolSizes{};
+    std::array<VkDescriptorPoolSize, 5> globalPoolSizes{};
     globalPoolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     globalPoolSizes[0].descriptorCount = globalSets * 2; // GlobalUBO + LightUBO
     globalPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -26,6 +26,8 @@ bool VulkanRenderAPI::createDescriptorPool()
     globalPoolSizes[2].descriptorCount = globalSets * 1; // PerObjectUBO (dynamic)
     globalPoolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     globalPoolSizes[3].descriptorCount = globalSets * 3; // pointLights + spotLights + instance data
+    globalPoolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    globalPoolSizes[4].descriptorCount = globalSets * 1; // heightmap
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -50,7 +52,7 @@ bool VulkanRenderAPI::createDescriptorPool()
 
 VkDescriptorPool VulkanRenderAPI::createPerDrawDescriptorPool()
 {
-    std::array<VkDescriptorPoolSize, 4> poolSizes{};
+    std::array<VkDescriptorPoolSize, 5> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = SETS_PER_POOL * 2; // GlobalUBO + LightUBO
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -59,6 +61,8 @@ VkDescriptorPool VulkanRenderAPI::createPerDrawDescriptorPool()
     poolSizes[2].descriptorCount = SETS_PER_POOL * 1; // PerObjectUBO (dynamic)
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolSizes[3].descriptorCount = SETS_PER_POOL * 3; // pointLights + spotLights + instance data
+    poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    poolSizes[4].descriptorCount = SETS_PER_POOL * 1; // heightmap
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -351,6 +355,11 @@ bool VulkanRenderAPI::createDescriptorSets()
         instanceDataInfo.offset = 0;
         instanceDataInfo.range = VK_WHOLE_SIZE;
 
+        VkDescriptorImageInfo heightmapInfo{};
+        heightmapInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        heightmapInfo.imageView = default_texture.imageView;
+        heightmapInfo.sampler = VK_NULL_HANDLE;
+
         VkDescriptorWriter(descriptor_sets[i])
             .writeBuffer(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &globalBufferInfo)
             .writeBuffer(3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &lightBufferInfo)
@@ -358,6 +367,7 @@ bool VulkanRenderAPI::createDescriptorSets()
             .writeBuffer(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &pointLightsInfo)
             .writeBuffer(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &spotLightsInfo)
             .writeBuffer(12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &instanceDataInfo)
+            .writeImage(13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &heightmapInfo)
             .update(device);
     }
 
@@ -405,7 +415,8 @@ VkDescriptorSet VulkanRenderAPI::allocateFromPerDrawPool(uint32_t frameIndex)
     return ds;
 }
 
-void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frameIndex, TextureHandle texture)
+void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frameIndex,
+                                              TextureHandle texture, TextureHandle heightmap)
 {
     // Binding 0: GlobalUBO
     VkDescriptorBufferInfo globalBufferInfo{};
@@ -426,6 +437,20 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
             imageInfo.imageView = default_texture.imageView;
             imageInfo.sampler = default_texture.sampler;
         }
+    }
+
+    // Binding 13: Heightmap texture, sampled without a separate sampler via Texture2D.Load().
+    VkDescriptorImageInfo heightmapInfo{};
+    heightmapInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    {
+        std::lock_guard<std::mutex> lock(m_textureMutex);
+        auto it = textures.find(heightmap);
+        if (heightmap != INVALID_TEXTURE && it != textures.end()) {
+            heightmapInfo.imageView = it->second.imageView;
+        } else {
+            heightmapInfo.imageView = default_texture.imageView;
+        }
+        heightmapInfo.sampler = VK_NULL_HANDLE;
     }
 
     // Binding 2: Shadow map (fall back to default depth texture + comparison sampler)
@@ -511,6 +536,7 @@ void VulkanRenderAPI::initializeDescriptorSet(VkDescriptorSet ds, uint32_t frame
         .writeBuffer(10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &pointLightsInfo)
         .writeBuffer(11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &spotLightsInfo)
         .writeBuffer(12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &instanceDataInfo)
+        .writeImage(13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &heightmapInfo)
         .update(device);
 }
 
@@ -679,10 +705,14 @@ bool VulkanRenderAPI::createDefaultTexture()
     return true;
 }
 
-VkDescriptorSet VulkanRenderAPI::getOrAllocateDescriptorSet(uint32_t frameIndex, TextureHandle texture)
+VkDescriptorSet VulkanRenderAPI::getOrAllocateDescriptorSet(uint32_t frameIndex,
+                                                            TextureHandle texture,
+                                                            TextureHandle heightmap)
 {
+    VulkanDrawDescriptorKey key{texture, heightmap};
+
     // Check cache first - reuse descriptor set for same texture within a frame
-    auto cacheIt = texture_descriptor_cache.find(texture);
+    auto cacheIt = texture_descriptor_cache.find(key);
     if (cacheIt != texture_descriptor_cache.end()) {
         return cacheIt->second;
     }
@@ -695,10 +725,10 @@ VkDescriptorSet VulkanRenderAPI::getOrAllocateDescriptorSet(uint32_t frameIndex,
     }
 
     // Write UBO, texture, and shadow map bindings
-    initializeDescriptorSet(ds, frameIndex, texture);
+    initializeDescriptorSet(ds, frameIndex, texture, heightmap);
 
     // Cache for reuse within this frame
-    texture_descriptor_cache[texture] = ds;
+    texture_descriptor_cache[key] = ds;
     return ds;
 }
 
@@ -741,10 +771,12 @@ VkDescriptorSet VulkanRenderAPI::workerAllocateFromPool(PerThreadCommandPool& wo
 }
 
 VkDescriptorSet VulkanRenderAPI::workerGetOrAllocateDescriptorSet(
-    PerThreadCommandPool& worker, uint32_t frameIndex, TextureHandle texture)
+    PerThreadCommandPool& worker, uint32_t frameIndex, TextureHandle texture, TextureHandle heightmap)
 {
+    VulkanDrawDescriptorKey key{texture, heightmap};
+
     // Check worker-local cache first
-    auto it = worker.texture_cache.find(texture);
+    auto it = worker.texture_cache.find(key);
     if (it != worker.texture_cache.end())
         return it->second;
 
@@ -754,8 +786,8 @@ VkDescriptorSet VulkanRenderAPI::workerGetOrAllocateDescriptorSet(
 
     // initializeDescriptorSet is thread-safe: writes to freshly allocated set,
     // reads only immutable state (UBO handles, texture map, shadow map)
-    initializeDescriptorSet(ds, frameIndex, texture);
+    initializeDescriptorSet(ds, frameIndex, texture, heightmap);
 
-    worker.texture_cache[texture] = ds;
+    worker.texture_cache[key] = ds;
     return ds;
 }

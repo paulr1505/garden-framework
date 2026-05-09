@@ -553,7 +553,8 @@ void D3D12PostProcessGraphBuilder::addExtraPasses(RenderGraph& graph, const Hand
                 b.write(h.output, RGResourceUsage::RenderTarget);
                 b.setSideEffect();
             },
-            [](RGContext&) {
+            [cfg](RGContext&) {
+                RmlUiManager::get().beginFrame(static_cast<int>(cfg.width), static_cast<int>(cfg.height));
                 RmlUiManager::get().render();
             });
     }

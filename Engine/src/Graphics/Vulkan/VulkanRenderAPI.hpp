@@ -22,12 +22,34 @@
 #include <atomic>
 #include <mutex>
 #include <future>
+#include <functional>
 
 // vk-bootstrap
 #include "VkBootstrap.h"
 
 // Forward declarations
 class VulkanMesh;
+
+struct VulkanDrawDescriptorKey
+{
+    TextureHandle texture = INVALID_TEXTURE;
+    TextureHandle heightmap = INVALID_TEXTURE;
+
+    bool operator==(const VulkanDrawDescriptorKey& other) const
+    {
+        return texture == other.texture && heightmap == other.heightmap;
+    }
+};
+
+struct VulkanDrawDescriptorKeyHash
+{
+    size_t operator()(const VulkanDrawDescriptorKey& key) const noexcept
+    {
+        const size_t a = std::hash<TextureHandle>{}(key.texture);
+        const size_t b = std::hash<TextureHandle>{}(key.heightmap);
+        return a ^ (b + 0x9e3779b97f4a7c15ull + (a << 6) + (a >> 2));
+    }
+};
 
 class VulkanRenderAPI : public IRenderAPI
 {
@@ -96,6 +118,7 @@ public:
     // Command buffer replay (multicore rendering)
     virtual void replayCommandBuffer(const RenderCommandBuffer& cmds) override;
     virtual void replayCommandBufferParallel(const RenderCommandBuffer& cmds) override;
+    bool supportsHeightmapDisplacement() const override { return true; }
 
     // Debug line rendering
     virtual void renderDebugLines(const vertex* vertices, size_t vertex_count) override;
@@ -136,6 +159,7 @@ public:
     uint32_t getGraphicsQueueFamily() const { return graphics_queue_family; }
     VkRenderPass getRenderPass() const { return render_pass; }
     VkRenderPass getFxaaRenderPass() const { return fxaaPass_.getRenderPass(); }
+    VkRenderPass getCurrentRmlRenderPass() const { return m_currentRmlRenderPass; }
     uint32_t getSwapchainImageCount() const { return static_cast<uint32_t>(swapchain_images.size()); }
     VkCommandBuffer getCurrentCommandBuffer() const { return command_buffers[current_frame]; }
     VkFormat getSwapchainFormat() const { return swapchain_format; }
@@ -195,6 +219,7 @@ private:
                         VkPipeline pipeline,
                         uint32_t width, uint32_t height,
                         bool enableSSAO, bool enableShadowMask,
+                        bool renderRml,
                         bool renderImGui);
     void uploadLightUniformBuffer(uint32_t frameIndex);
     void uploadCurrentForwardLightBuffers(uint32_t frameIndex);
@@ -224,10 +249,12 @@ private:
     void endSingleTimeCommands(VkCommandBuffer commandBuffer);
     void generateMipmaps(VkImage image, VkFormat imageFormat, int32_t texWidth, int32_t texHeight, uint32_t mipLevels);
 
-    VkDescriptorSet getOrAllocateDescriptorSet(uint32_t frameIndex, TextureHandle texture);
+    VkDescriptorSet getOrAllocateDescriptorSet(uint32_t frameIndex, TextureHandle texture,
+                                               TextureHandle heightmap = INVALID_TEXTURE);
     VkDescriptorPool createPerDrawDescriptorPool();
     VkDescriptorSet allocateFromPerDrawPool(uint32_t frameIndex);
-    void initializeDescriptorSet(VkDescriptorSet ds, uint32_t frameIndex, TextureHandle texture);
+    void initializeDescriptorSet(VkDescriptorSet ds, uint32_t frameIndex, TextureHandle texture,
+                                 TextureHandle heightmap = INVALID_TEXTURE);
     bool shouldUseStaticInstancing(const RenderCommandBuffer& cmds) const;
     bool replayStaticInstancedBatch(VkCommandBuffer cmd, const RenderCommandBuffer& cmds,
                                     size_t start, size_t count,
@@ -301,7 +328,7 @@ private:
 
         // Per-worker descriptor allocation (avoids contention on shared pools)
         PerFrameDescriptorState descriptor_state[MAX_FRAMES_IN_FLIGHT] = {};
-        std::unordered_map<TextureHandle, VkDescriptorSet> texture_cache;
+        std::unordered_map<VulkanDrawDescriptorKey, VkDescriptorSet, VulkanDrawDescriptorKeyHash> texture_cache;
 
         PerThreadCommandPool() = default;
         PerThreadCommandPool(PerThreadCommandPool&& o) noexcept
@@ -332,7 +359,9 @@ private:
     // Parallel replay helpers that reference PerThreadCommandPool
     PerThreadCommandPool* acquireThreadPool();
     VkDescriptorSet workerAllocateFromPool(PerThreadCommandPool& worker, uint32_t frameIndex);
-    VkDescriptorSet workerGetOrAllocateDescriptorSet(PerThreadCommandPool& worker, uint32_t frameIndex, TextureHandle texture);
+    VkDescriptorSet workerGetOrAllocateDescriptorSet(PerThreadCommandPool& worker, uint32_t frameIndex,
+                                                     TextureHandle texture,
+                                                     TextureHandle heightmap = INVALID_TEXTURE);
 
     // Continuation render pass for parallel replay (loadOp=LOAD to preserve prior content)
     VkRenderPass continuation_render_pass = VK_NULL_HANDLE;
@@ -348,6 +377,7 @@ private:
     // the legacy viewport_image, or a PIE viewport's image (the latter when
     // the editor's main viewport routes through a SceneViewport wrapper).
     VkImage current_active_color_image = VK_NULL_HANDLE;
+    VkRenderPass m_currentRmlRenderPass = VK_NULL_HANDLE;
     bool using_continuation_pass = false;
 
     // Synchronization
@@ -440,7 +470,7 @@ private:
     // For multicore rendering, additional contexts can be created per worker thread.
     struct VulkanDescriptorContext {
         PerFrameDescriptorState state[2]; // One per frame in flight
-        std::unordered_map<TextureHandle, VkDescriptorSet> texture_cache;
+        std::unordered_map<VulkanDrawDescriptorKey, VkDescriptorSet, VulkanDrawDescriptorKeyHash> texture_cache;
         bool limit_warned = false;
 
         void reset(VkDevice device, uint32_t frame_index) {
@@ -459,7 +489,7 @@ private:
     bool descriptor_limit_warned = false;
 
     // Cache: texture handle -> VkDescriptorSet (for reuse within a frame)
-    std::unordered_map<TextureHandle, VkDescriptorSet> texture_descriptor_cache;
+    std::unordered_map<VulkanDrawDescriptorKey, VkDescriptorSet, VulkanDrawDescriptorKeyHash> texture_descriptor_cache;
 
     // Uniform buffers (per-frame) - GlobalUBO at binding 0
     std::vector<VkBuffer> uniform_buffers;
@@ -712,6 +742,7 @@ private:
     VkRenderPass ui_render_pass = VK_NULL_HANDLE;
     int viewport_width_rt = 0;
     int viewport_height_rt = 0;
+    bool m_sceneRmlEnabled = false;
     void createViewportResources(int w, int h);
     void destroyViewportResources();
     // True when the API is rendering for an editor (legacy viewport_image set
@@ -729,6 +760,7 @@ public:
     virtual void endSceneRender() override;
     virtual uint64_t getViewportTextureID() override;
     virtual void setViewportSize(int width, int height) override;
+    void setSceneRmlEnabled(bool enabled) override { m_sceneRmlEnabled = enabled; }
     virtual void renderUI() override;
 
     // SceneViewport-based editor path. Each call to createSceneViewport

@@ -62,6 +62,12 @@ bool staticInstanceCompatible(const DrawCommand& a, const DrawCommand& b)
         && a.gpu_mesh == b.gpu_mesh
         && a.use_texture == b.use_texture
         && a.texture == b.texture
+        && a.use_heightmap_displacement == b.use_heightmap_displacement
+        && a.heightmap_texture == b.heightmap_texture
+        && a.heightmap_height_scale == b.heightmap_height_scale
+        && a.heightmap_height_offset == b.heightmap_height_offset
+        && a.heightmap_texel_size.x == b.heightmap_texel_size.x
+        && a.heightmap_texel_size.y == b.heightmap_texel_size.y
         && a.pso_key == b.pso_key
         && a.start_vertex == b.start_vertex
         && a.vertex_count == b.vertex_count
@@ -106,8 +112,32 @@ struct VulkanParallelReplayItem
     uint32_t first = 0;
     VkPipeline pipeline = VK_NULL_HANDLE;
     TextureHandle texture = INVALID_TEXTURE;
+    TextureHandle heightmapTexture = INVALID_TEXTURE;
     PerObjectUBO objectUBO{};
 };
+
+VulkanHeightmapDisplacementData makeHeightmapData(bool useDisplacement,
+                                                  TextureHandle heightmapTexture,
+                                                  float heightScale,
+                                                  float heightOffset,
+                                                  const glm::vec2& texelSize)
+{
+    VulkanHeightmapDisplacementData data{};
+    data.useHeightmapDisplacement =
+        (useDisplacement && heightmapTexture != INVALID_TEXTURE) ? 1 : 0;
+    data.heightmapHeightScale = heightScale;
+    data.heightmapHeightOffset = heightOffset;
+    data.heightmapTexelSize = texelSize;
+    return data;
+}
+
+void applyHeightmapData(PerObjectUBO& ubo, const VulkanHeightmapDisplacementData& data)
+{
+    ubo.useHeightmapDisplacement = data.useHeightmapDisplacement;
+    ubo.heightmapHeightScale = data.heightmapHeightScale;
+    ubo.heightmapHeightOffset = data.heightmapHeightOffset;
+    ubo.heightmapTexelSize = data.heightmapTexelSize;
+}
 } // namespace
 
 void VulkanRenderAPI::uploadLightUniformBuffer(uint32_t frameIndex)
@@ -494,10 +524,24 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
     if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) return;
 
     if (in_shadow_pass) {
-        // Shadow pass - push model matrix per draw call via push constants (offset 64)
-        // Light space matrix is at offset 0, pushed once per cascade in beginCascade()
+        const auto heightmap = makeHeightmapData(m.heightmap_displacement,
+                                                 m.heightmap_texture,
+                                                 m.heightmap_height_scale,
+                                                 m.heightmap_height_offset,
+                                                 m.heightmap_texel_size);
+        VulkanShadowPushConstants push{};
+        push.lightSpaceMatrix = lightSpaceMatrices[currentCascade];
+        push.model = current_model_matrix;
+        push.heightmap = heightmap;
+        VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, INVALID_TEXTURE,
+                                                        heightmap.useHeightmapDisplacement ? m.heightmap_texture : INVALID_TEXTURE);
+        if (ds != VK_NULL_HANDLE) {
+            uint32_t dummyOffset = 0;
+            vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                shadow_pipeline_layout, 0, 1, &ds, 1, &dummyOffset);
+        }
         vkCmdPushConstants(command_buffers[current_frame], shadow_pipeline_layout,
-                           VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4), sizeof(glm::mat4), &current_model_matrix);
+                           VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
 
         // Bind vertex buffer and draw (with redundant bind tracking)
         VkBuffer vb = vulkanMesh->getVertexBuffer();
@@ -572,6 +616,11 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
         objUbo.hasNormalMap = 0;
         objUbo.hasOcclusionMap = 0;
         objUbo.hasEmissiveMap = 0;
+        applyHeightmapData(objUbo, makeHeightmapData(m.heightmap_displacement,
+                                                     m.heightmap_texture,
+                                                     m.heightmap_height_scale,
+                                                     m.heightmap_height_offset,
+                                                     m.heightmap_texel_size));
 
         void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
         memcpy(dst, &objUbo, sizeof(objUbo));
@@ -580,7 +629,9 @@ void VulkanRenderAPI::renderMesh(const mesh& m, const RenderState& state)
 
     // Get or allocate descriptor set for this texture (dynamically growing pools)
     TextureHandle texHandle = (m.texture_set && m.texture != INVALID_TEXTURE) ? m.texture : INVALID_TEXTURE;
-    VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, texHandle);
+    TextureHandle heightmapHandle = (m.heightmap_displacement && m.heightmap_texture != INVALID_TEXTURE)
+        ? m.heightmap_texture : INVALID_TEXTURE;
+    VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, texHandle, heightmapHandle);
     if (ds == VK_NULL_HANDLE) return; // Pool allocation failed
 
     // Bind the per-draw descriptor set with dynamic offset (rebind if set or offset changed)
@@ -628,10 +679,24 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     if (!vulkanMesh || vulkanMesh->getVertexBuffer() == VK_NULL_HANDLE) return;
 
     if (in_shadow_pass) {
-        // Shadow pass - push model matrix per draw call via push constants (offset 64)
-        // Light space matrix is at offset 0, pushed once per cascade in beginCascade()
+        const auto heightmap = makeHeightmapData(m.heightmap_displacement,
+                                                 m.heightmap_texture,
+                                                 m.heightmap_height_scale,
+                                                 m.heightmap_height_offset,
+                                                 m.heightmap_texel_size);
+        VulkanShadowPushConstants push{};
+        push.lightSpaceMatrix = lightSpaceMatrices[currentCascade];
+        push.model = current_model_matrix;
+        push.heightmap = heightmap;
+        VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, INVALID_TEXTURE,
+                                                        heightmap.useHeightmapDisplacement ? m.heightmap_texture : INVALID_TEXTURE);
+        if (ds != VK_NULL_HANDLE) {
+            uint32_t dummyOffset = 0;
+            vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                shadow_pipeline_layout, 0, 1, &ds, 1, &dummyOffset);
+        }
         vkCmdPushConstants(command_buffers[current_frame], shadow_pipeline_layout,
-                           VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4), sizeof(glm::mat4), &current_model_matrix);
+                           VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
 
         VkBuffer vb = vulkanMesh->getVertexBuffer();
         if (vb != last_bound_vertex_buffer) {
@@ -715,6 +780,11 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
         objUbo.hasNormalMap = 0;
         objUbo.hasOcclusionMap = 0;
         objUbo.hasEmissiveMap = 0;
+        applyHeightmapData(objUbo, makeHeightmapData(m.heightmap_displacement,
+                                                     m.heightmap_texture,
+                                                     m.heightmap_height_scale,
+                                                     m.heightmap_height_offset,
+                                                     m.heightmap_texel_size));
 
         void* dst = static_cast<char*>(per_object_uniform_mapped[current_frame]) + perObjectDynamicOffset;
         memcpy(dst, &objUbo, sizeof(objUbo));
@@ -722,7 +792,9 @@ void VulkanRenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t
     }
 
     // Get or allocate descriptor set for bound texture (dynamically growing pools)
-    VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, bound_texture);
+    TextureHandle heightmapHandle = (m.heightmap_displacement && m.heightmap_texture != INVALID_TEXTURE)
+        ? m.heightmap_texture : INVALID_TEXTURE;
+    VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, bound_texture, heightmapHandle);
     if (ds == VK_NULL_HANDLE) return; // Pool allocation failed
 
     // Bind the per-draw descriptor set with dynamic offset (rebind if set or offset changed)
@@ -872,33 +944,50 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 
         if (drawCmd.pso_key.shadow)
         {
+            const auto heightmap = makeHeightmapData(drawCmd.use_heightmap_displacement,
+                                                     drawCmd.heightmap_texture,
+                                                     drawCmd.heightmap_height_scale,
+                                                     drawCmd.heightmap_height_offset,
+                                                     drawCmd.heightmap_texel_size);
+            TextureHandle heightmapHandle = heightmap.useHeightmapDisplacement
+                ? drawCmd.heightmap_texture : INVALID_TEXTURE;
+
             // Shadow pass: select alpha-test or opaque shadow pipeline
             if (drawCmd.pso_key.alpha_test && shadow_pipeline_alpha_test != VK_NULL_HANDLE)
             {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_alpha_test);
                 // Alpha-test shadow needs texture binding via main descriptor set
                 TextureHandle texHandle = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
-                VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, texHandle);
+                VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, texHandle, heightmapHandle);
                 if (ds != VK_NULL_HANDLE) {
                     uint32_t dummyOffset = 0;
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                         shadow_alphatest_pipeline_layout, 0, 1, &ds, 1, &dummyOffset);
                 }
-                // Push model matrix + alphaCutoff (must use all stages from the overlapping range)
+                VulkanShadowAlphaPushConstants push{};
+                push.lightSpaceMatrix = lightSpaceMatrices[currentCascade];
+                push.model = drawCmd.model_matrix;
+                push.heightmap = heightmap;
+                push.alphaCutoff = drawCmd.alpha_cutoff;
+                // Push all fields at once because the range is shared by VS and PS.
                 VkShaderStageFlags atStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
                 vkCmdPushConstants(cmd, shadow_alphatest_pipeline_layout,
-                                   atStages, sizeof(glm::mat4), sizeof(glm::mat4),
-                                   &drawCmd.model_matrix);
-                vkCmdPushConstants(cmd, shadow_alphatest_pipeline_layout,
-                                   atStages, 2 * sizeof(glm::mat4), sizeof(float),
-                                   &drawCmd.alpha_cutoff);
+                                   atStages, 0, sizeof(push), &push);
             }
             else
             {
-                // Push model matrix via push constants (opaque shadow)
+                VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, INVALID_TEXTURE, heightmapHandle);
+                if (ds != VK_NULL_HANDLE) {
+                    uint32_t dummyOffset = 0;
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        shadow_pipeline_layout, 0, 1, &ds, 1, &dummyOffset);
+                }
+                VulkanShadowPushConstants push{};
+                push.lightSpaceMatrix = lightSpaceMatrices[currentCascade];
+                push.model = drawCmd.model_matrix;
+                push.heightmap = heightmap;
                 vkCmdPushConstants(cmd, shadow_pipeline_layout,
-                                   VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4), sizeof(glm::mat4),
-                                   &drawCmd.model_matrix);
+                                   VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
             }
 
             VkBuffer vb = vulkanMesh->getVertexBuffer();
@@ -1006,6 +1095,11 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             objUbo.hasNormalMap = 0;
             objUbo.hasOcclusionMap = 0;
             objUbo.hasEmissiveMap = 0;
+            applyHeightmapData(objUbo, makeHeightmapData(drawCmd.use_heightmap_displacement,
+                                                         drawCmd.heightmap_texture,
+                                                         drawCmd.heightmap_height_scale,
+                                                         drawCmd.heightmap_height_offset,
+                                                         drawCmd.heightmap_texel_size));
             objUbo.useInstanceData = useInstanceData ? 1 : 0;
             objUbo.instanceBase = instanceBase;
 
@@ -1015,7 +1109,9 @@ void VulkanRenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 
         // Get or allocate descriptor set for this draw's texture
         TextureHandle texHandle = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
-        VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, texHandle);
+        TextureHandle heightmapHandle = drawCmd.use_heightmap_displacement
+            ? drawCmd.heightmap_texture : INVALID_TEXTURE;
+        VkDescriptorSet ds = getOrAllocateDescriptorSet(current_frame, texHandle, heightmapHandle);
         if (ds == VK_NULL_HANDLE) continue;
 
         if (ds != last_bound_descriptor_set || perObjectDynamicOffset != last_bound_dynamic_offset) {
@@ -1146,6 +1242,8 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
         if (item.pipeline == VK_NULL_HANDLE) continue;
 
         item.texture = drawCmd.use_texture ? drawCmd.texture : INVALID_TEXTURE;
+        item.heightmapTexture = drawCmd.use_heightmap_displacement
+            ? drawCmd.heightmap_texture : INVALID_TEXTURE;
         item.objectUBO.model = drawCmd.model_matrix;
         item.objectUBO.normalMatrix = drawCmd.normal_matrix;
         item.objectUBO.color = drawCmd.color;
@@ -1158,6 +1256,11 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
         item.objectUBO.hasNormalMap = 0;
         item.objectUBO.hasOcclusionMap = 0;
         item.objectUBO.hasEmissiveMap = 0;
+        applyHeightmapData(item.objectUBO, makeHeightmapData(drawCmd.use_heightmap_displacement,
+                                                             drawCmd.heightmap_texture,
+                                                             drawCmd.heightmap_height_scale,
+                                                             drawCmd.heightmap_height_offset,
+                                                             drawCmd.heightmap_texel_size));
 
         replayItems.push_back(item);
     }
@@ -1341,7 +1444,9 @@ void VulkanRenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmd
                     memcpy(dst, &item.objectUBO, sizeof(item.objectUBO));
 
                     // Get or allocate descriptor set (worker-local pool — no contention)
-                    VkDescriptorSet ds = workerGetOrAllocateDescriptorSet(*workerPool, frameIdx, item.texture);
+                    VkDescriptorSet ds = workerGetOrAllocateDescriptorSet(*workerPool, frameIdx,
+                                                                          item.texture,
+                                                                          item.heightmapTexture);
                     if (ds == VK_NULL_HANDLE) continue;
 
                     // Bind descriptor set with dynamic offset

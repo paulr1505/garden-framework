@@ -43,6 +43,12 @@ cbuffer PerObjectCB : register(b1)
     int uHasNormalMap;
     int uHasOcclusionMap;
     int uHasEmissiveMap;
+    int uUseHeightmapDisplacement;
+    float uHeightmapScale;
+    float uHeightmapOffset;
+    float _heightmapPad0;
+    float2 uHeightmapTexelSize;
+    float2 _heightmapPad1;
 #ifdef TARGET_SPIRV
     int uUseInstanceData;
     uint uInstanceBase;
@@ -65,13 +71,15 @@ cbuffer PerObjectCB : register(b1)
 [[vk::binding(9, 0)]]Texture2D emissiveTexture : register(t5);
 [[vk::binding(9, 0)]]SamplerState emissiveSampler : register(s5);
 
+[[vk::binding(13, 0)]]Texture2D heightmapTexture : register(t8);
+
 #ifdef TARGET_SPIRV
 struct InstanceData
 {
     float4x4 model;
     float4x4 normalMatrix;
 };
-[[vk::binding(12, 0)]]StructuredBuffer<InstanceData> instanceData : register(t8);
+[[vk::binding(12, 0)]]StructuredBuffer<InstanceData> instanceData : register(t9);
 #endif
 
 struct VSInput
@@ -99,6 +107,21 @@ struct PSOutput
     float4 RT2 : SV_Target2; // Emissive + AO
 };
 
+float sampleHeightmap(float2 uv)
+{
+    float2 texelSize = max(uHeightmapTexelSize, float2(0.000001, 0.000001));
+    float2 dimensions = max(round(1.0 / texelSize), float2(1.0, 1.0));
+    int2 coord = int2(round(saturate(uv) * (dimensions - 1.0)));
+    return heightmapTexture.Load(int3(coord, 0)).r * uHeightmapScale + uHeightmapOffset;
+}
+
+float3 applyHeightmapDisplacement(float3 position, float2 uv)
+{
+    if (uUseHeightmapDisplacement != 0)
+        position.y += sampleHeightmap(uv);
+    return position;
+}
+
 [shader("vertex")]
 #ifdef TARGET_SPIRV
 PSInput vertexMain(VSInput input, uint instanceId : SV_InstanceID)
@@ -122,7 +145,8 @@ PSInput vertexMain(VSInput input)
     float4x4 normalMatrix = uNormalMatrix;
 #endif
 
-    float4 worldPos = mul(model, float4(input.position, 1.0));
+    float3 localPosition = applyHeightmapDisplacement(input.position, input.texcoord);
+    float4 worldPos = mul(model, float4(localPosition, 1.0));
     output.fragPos = worldPos.xyz;
 
     float3x3 normalMat = (float3x3)normalMatrix;

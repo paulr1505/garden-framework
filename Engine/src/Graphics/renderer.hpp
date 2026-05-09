@@ -318,7 +318,10 @@ public:
                                      has_tex ? range.texture : INVALID_TEXTURE, has_tex,
                                      key, range.start_vertex, range.vertex_count,
                                      glm::vec3(range.base_color_factor), range_state.alpha_cutoff,
-                                     range.metallic_factor, range.roughness_factor, range.emissive_factor);
+                                     range.metallic_factor, range.roughness_factor, range.emissive_factor,
+                                     m.heightmap_texture, m.heightmap_displacement,
+                                     m.heightmap_height_scale, m.heightmap_height_offset,
+                                     m.heightmap_texel_size);
                 });
         }
         else
@@ -327,7 +330,10 @@ public:
             bool has_tex = (m.texture_set && m.texture != INVALID_TEXTURE);
             cmds.recordDraw(m.gpu_mesh, model,
                             has_tex ? m.texture : INVALID_TEXTURE, has_tex,
-                            key, base_state.color);
+                            key, base_state.color,
+                            m.heightmap_texture, m.heightmap_displacement,
+                            m.heightmap_height_scale, m.heightmap_height_offset,
+                            m.heightmap_texel_size);
         }
     }
 
@@ -371,7 +377,10 @@ public:
                                      has_tex ? range.texture : INVALID_TEXTURE, has_tex,
                                      key, range.start_vertex, range.vertex_count,
                                      glm::vec3(range.base_color_factor), range_state.alpha_cutoff,
-                                     range.metallic_factor, range.roughness_factor, range.emissive_factor);
+                                     range.metallic_factor, range.roughness_factor, range.emissive_factor,
+                                     m.heightmap_texture, m.heightmap_displacement,
+                                     m.heightmap_height_scale, m.heightmap_height_offset,
+                                     m.heightmap_texel_size);
                 });
         }
         else
@@ -397,7 +406,10 @@ public:
                 tex = m.texture;
                 has_tex = true;
             }
-            cmds.recordDraw(lod_gpu_mesh, model, tex, has_tex, key, base_state.color);
+            cmds.recordDraw(lod_gpu_mesh, model, tex, has_tex, key, base_state.color,
+                            m.heightmap_texture, m.heightmap_displacement,
+                            m.heightmap_height_scale, m.heightmap_height_offset,
+                            m.heightmap_texel_size);
         }
     }
 
@@ -500,11 +512,18 @@ public:
                 }
                 cmds.recordDrawRange(m.gpu_mesh, model, tex, has_tex,
                                      key, range.start_vertex, range.vertex_count,
-                                     glm::vec3(1.0f), alpha_cutoff);
+                                     glm::vec3(1.0f), alpha_cutoff,
+                                     m.heightmap_texture, m.heightmap_displacement,
+                                     m.heightmap_height_scale, m.heightmap_height_offset,
+                                     m.heightmap_texel_size);
                 });
         } else {
             PSOKey key = PSOKey::depthPrepass();
-            cmds.recordDraw(m.gpu_mesh, model, INVALID_TEXTURE, false, key);
+            cmds.recordDraw(m.gpu_mesh, model, INVALID_TEXTURE, false, key,
+                            glm::vec3(1.0f),
+                            m.heightmap_texture, m.heightmap_displacement,
+                            m.heightmap_height_scale, m.heightmap_height_offset,
+                            m.heightmap_texel_size);
         }
     }
 
@@ -561,7 +580,10 @@ public:
                     }
                     cmds.recordDrawRange(gpu_mesh, model, tex, has_tex,
                                          key, range.start_vertex, range.vertex_count,
-                                         glm::vec3(1.0f), alpha_cutoff);
+                                         glm::vec3(1.0f), alpha_cutoff,
+                                         m.heightmap_texture, m.heightmap_displacement,
+                                         m.heightmap_height_scale, m.heightmap_height_offset,
+                                         m.heightmap_texel_size);
                     });
                 return;
             }
@@ -569,7 +591,11 @@ public:
 
         // Simple path: no special materials
         PSOKey key = PSOKey::depthPrepass();
-        cmds.recordDraw(gpu_mesh, model, INVALID_TEXTURE, false, key);
+        cmds.recordDraw(gpu_mesh, model, INVALID_TEXTURE, false, key,
+                        glm::vec3(1.0f),
+                        m.heightmap_texture, m.heightmap_displacement,
+                        m.heightmap_height_scale, m.heightmap_height_offset,
+                        m.heightmap_texel_size);
     }
 
     // Record a shadow pass draw command.
@@ -630,11 +656,18 @@ public:
                 }
                 cmds.recordDrawRange(gpu_mesh, model, tex, has_tex,
                                      key, range.start_vertex, range.vertex_count,
-                                     glm::vec3(1.0f), alpha_cutoff);
+                                     glm::vec3(1.0f), alpha_cutoff,
+                                     m.heightmap_texture, m.heightmap_displacement,
+                                     m.heightmap_height_scale, m.heightmap_height_offset,
+                                     m.heightmap_texel_size);
                 });
         } else {
             PSOKey key = PSOKey::shadowPass();
-            cmds.recordDraw(gpu_mesh, model, INVALID_TEXTURE, false, key);
+            cmds.recordDraw(gpu_mesh, model, INVALID_TEXTURE, false, key,
+                            glm::vec3(1.0f),
+                            m.heightmap_texture, m.heightmap_displacement,
+                            m.heightmap_height_scale, m.heightmap_height_offset,
+                            m.heightmap_texel_size);
         }
     }
 
@@ -1336,9 +1369,10 @@ public:
         // Render debug lines (after scene, before UI)
         DebugDraw::get().render(render_api, c);
 
-        // Render RmlUi (game UI). D3D12 routes this through the post-process graph
-        // (after tonemap, into the LDR backbuffer) so PSO/RTV formats agree.
-        if (std::string(render_api->getAPIName()) != "D3D12")
+        // D3D12/Vulkan composite RmlUi during post-processing so UI lands on
+        // the resolved LDR target after deferred/tonemap work.
+        const std::string api_name = render_api->getAPIName();
+        if (api_name != "D3D12" && api_name != "Vulkan")
             RmlUiManager::get().render();
 
         // Render ImGui UI (dev tools)
@@ -1590,8 +1624,11 @@ public:
             render_api->renderSkybox();
         DebugDraw::get().render(render_api, c);
 
-        // Render RmlUi (game UI)
-        RmlUiManager::get().render();
+        // D3D12/Vulkan composite RmlUi during endSceneRender(), after the
+        // scene target has been resolved to the viewport texture.
+        const std::string api_name = render_api->getAPIName();
+        if (api_name != "D3D12" && api_name != "Vulkan")
+            RmlUiManager::get().render();
 
         // Finalize to viewport texture (NOT screen, NOT ImGui)
         render_api->endSceneRender();

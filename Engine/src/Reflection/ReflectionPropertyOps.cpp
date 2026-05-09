@@ -68,7 +68,7 @@ namespace ReflectionPropertyOps
         case EPropertyType::Int:       return EPropertyWidget::DragInt;
         case EPropertyType::Bool:      return EPropertyWidget::Checkbox;
         case EPropertyType::String:    return EPropertyWidget::InputText;
-        case EPropertyType::AssetPath: return EPropertyWidget::InputText;
+        case EPropertyType::AssetPath: return EPropertyWidget::AssetPath;
         case EPropertyType::Vec2:      return EPropertyWidget::DragFloat2;
         case EPropertyType::Vec3:      return EPropertyWidget::DragFloat3;
         case EPropertyType::Vec4:      return EPropertyWidget::DragFloat4;

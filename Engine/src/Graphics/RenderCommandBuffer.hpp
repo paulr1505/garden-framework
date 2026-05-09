@@ -90,6 +90,11 @@ struct DrawCommand
     PSOKey        pso_key;
     glm::vec3     color        = glm::vec3(1.0f);
     float         alpha_cutoff = 0.0f;  // >0 triggers alpha test discard in shader
+    TextureHandle heightmap_texture = INVALID_TEXTURE;
+    bool          use_heightmap_displacement = false;
+    float         heightmap_height_scale = 1.0f;
+    float         heightmap_height_offset = 0.0f;
+    glm::vec2     heightmap_texel_size = glm::vec2(0.0f);
 
     // PBR material properties
     float         metallic     = 0.0f;
@@ -115,7 +120,12 @@ public:
     // Record a full-mesh draw command
     void recordDraw(IGPUMesh* gpu_mesh, const glm::mat4& model_matrix,
                     TextureHandle texture, bool use_texture,
-                    const PSOKey& pso_key, const glm::vec3& color = glm::vec3(1.0f))
+                    const PSOKey& pso_key, const glm::vec3& color = glm::vec3(1.0f),
+                    TextureHandle heightmap_texture = INVALID_TEXTURE,
+                    bool use_heightmap_displacement = false,
+                    float heightmap_height_scale = 1.0f,
+                    float heightmap_height_offset = 0.0f,
+                    glm::vec2 heightmap_texel_size = glm::vec2(0.0f))
     {
         DrawCommand cmd;
         cmd.gpu_mesh = gpu_mesh;
@@ -125,6 +135,11 @@ public:
         cmd.use_texture = use_texture;
         cmd.pso_key = pso_key;
         cmd.color = color;
+        cmd.heightmap_texture = heightmap_texture;
+        cmd.use_heightmap_displacement = use_heightmap_displacement && heightmap_texture != INVALID_TEXTURE;
+        cmd.heightmap_height_scale = heightmap_height_scale;
+        cmd.heightmap_height_offset = heightmap_height_offset;
+        cmd.heightmap_texel_size = heightmap_texel_size;
         cmd.start_vertex = 0;
         cmd.vertex_count = 0;  // 0 means draw entire mesh
         m_commands.push_back(cmd);
@@ -136,7 +151,12 @@ public:
                          const PSOKey& pso_key,
                          size_t start_vertex, size_t vertex_count,
                          const glm::vec3& color = glm::vec3(1.0f),
-                         float alpha_cutoff = 0.0f)
+                         float alpha_cutoff = 0.0f,
+                         TextureHandle heightmap_texture = INVALID_TEXTURE,
+                         bool use_heightmap_displacement = false,
+                         float heightmap_height_scale = 1.0f,
+                         float heightmap_height_offset = 0.0f,
+                         glm::vec2 heightmap_texel_size = glm::vec2(0.0f))
     {
         DrawCommand cmd;
         cmd.gpu_mesh = gpu_mesh;
@@ -147,6 +167,11 @@ public:
         cmd.pso_key = pso_key;
         cmd.color = color;
         cmd.alpha_cutoff = alpha_cutoff;
+        cmd.heightmap_texture = heightmap_texture;
+        cmd.use_heightmap_displacement = use_heightmap_displacement && heightmap_texture != INVALID_TEXTURE;
+        cmd.heightmap_height_scale = heightmap_height_scale;
+        cmd.heightmap_height_offset = heightmap_height_offset;
+        cmd.heightmap_texel_size = heightmap_texel_size;
         cmd.start_vertex = start_vertex;
         cmd.vertex_count = vertex_count;
         m_commands.push_back(cmd);
@@ -159,7 +184,12 @@ public:
                             size_t start_vertex, size_t vertex_count,
                             const glm::vec3& color, float alpha_cutoff,
                             float metallic, float roughness,
-                            const glm::vec3& emissive = glm::vec3(0.0f))
+                            const glm::vec3& emissive = glm::vec3(0.0f),
+                            TextureHandle heightmap_texture = INVALID_TEXTURE,
+                            bool use_heightmap_displacement = false,
+                            float heightmap_height_scale = 1.0f,
+                            float heightmap_height_offset = 0.0f,
+                            glm::vec2 heightmap_texel_size = glm::vec2(0.0f))
     {
         DrawCommand cmd;
         cmd.gpu_mesh = gpu_mesh;
@@ -170,6 +200,11 @@ public:
         cmd.pso_key = pso_key;
         cmd.color = color;
         cmd.alpha_cutoff = alpha_cutoff;
+        cmd.heightmap_texture = heightmap_texture;
+        cmd.use_heightmap_displacement = use_heightmap_displacement && heightmap_texture != INVALID_TEXTURE;
+        cmd.heightmap_height_scale = heightmap_height_scale;
+        cmd.heightmap_height_offset = heightmap_height_offset;
+        cmd.heightmap_texel_size = heightmap_texel_size;
         cmd.metallic = metallic;
         cmd.roughness = roughness;
         cmd.emissive = emissive;
@@ -199,6 +234,13 @@ public:
                 if (a.start_vertex != b.start_vertex) return a.start_vertex < b.start_vertex;
                 if (a.vertex_count != b.vertex_count) return a.vertex_count < b.vertex_count;
                 if (a.alpha_cutoff != b.alpha_cutoff) return a.alpha_cutoff < b.alpha_cutoff;
+                if (a.use_heightmap_displacement != b.use_heightmap_displacement)
+                    return a.use_heightmap_displacement < b.use_heightmap_displacement;
+                if (a.heightmap_texture != b.heightmap_texture) return a.heightmap_texture < b.heightmap_texture;
+                if (a.heightmap_height_scale != b.heightmap_height_scale) return a.heightmap_height_scale < b.heightmap_height_scale;
+                if (a.heightmap_height_offset != b.heightmap_height_offset) return a.heightmap_height_offset < b.heightmap_height_offset;
+                if (a.heightmap_texel_size.x != b.heightmap_texel_size.x) return a.heightmap_texel_size.x < b.heightmap_texel_size.x;
+                if (a.heightmap_texel_size.y != b.heightmap_texel_size.y) return a.heightmap_texel_size.y < b.heightmap_texel_size.y;
                 if (a.metallic != b.metallic) return a.metallic < b.metallic;
                 if (a.roughness != b.roughness) return a.roughness < b.roughness;
                 if (vecLess(a.color, b.color)) return true;

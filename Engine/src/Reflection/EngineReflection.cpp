@@ -7,6 +7,7 @@ void registerEngineReflection(ReflectionRegistry& registry)
 {
     registry.reflect<TransformComponent>("TransformComponent");
     registry.reflect<TagComponent>("TagComponent");
+    registry.reflect<TerrainComponent>("TerrainComponent");
     registry.reflect<RigidBodyComponent>("RigidBodyComponent");
     registry.reflect<ColliderComponent>("ColliderComponent");
     registry.reflect<ConstraintComponent>("ConstraintComponent");

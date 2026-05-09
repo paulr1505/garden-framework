@@ -170,17 +170,17 @@ bool VulkanRenderAPI::initialize(WindowHandle window, int width, int height, flo
         return false;
     }
 
-    // Create descriptor sets
-    LOG_ENGINE_INFO("[Vulkan] Creating descriptor sets...");
-    if (!createDescriptorSets()) {
-        LOG_ENGINE_ERROR("[Vulkan] Failed to create descriptor sets");
-        return false;
-    }
-
     // Create default texture
     LOG_ENGINE_INFO("[Vulkan] Creating default texture...");
     if (!createDefaultTexture()) {
         LOG_ENGINE_ERROR("[Vulkan] Failed to create default texture");
+        return false;
+    }
+
+    // Create descriptor sets
+    LOG_ENGINE_INFO("[Vulkan] Creating descriptor sets...");
+    if (!createDescriptorSets()) {
+        LOG_ENGINE_ERROR("[Vulkan] Failed to create descriptor sets");
         return false;
     }
 

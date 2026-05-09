@@ -569,7 +569,8 @@ bool D3D12RenderAPI::createDefaultPBRTextures()
         copyCmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
         m_copyQueue.retainStagingBuffer(std::move(uploadBuffer));
-        m_copyQueue.addPendingTransition(tex.resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        m_copyQueue.addPendingTransition(tex.resource.Get(),
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         // Create SRV
         tex.srvIndex = m_srvAllocator.allocate();

@@ -12,6 +12,7 @@
 #include "Assets/CompiledMeshSerializer.hpp"
 #include "Assets/CompiledTextureSerializer.hpp"
 #include "Assets/MeshChunker.hpp"
+#include "Assets/TerrainBuilder.hpp"
 #include "Assets/AssetManager.hpp"
 #include "Reflection/ReflectionRegistry.hpp"
 #include "Reflection/ReflectionSerializer.hpp"
@@ -364,6 +365,67 @@ static void setupLevelColliderComponent(entt::registry& registry,
     }
 }
 
+static void setupLevelTerrainComponent(entt::registry& registry,
+                                       entt::entity e,
+                                       const LevelEntity& entity_data,
+                                       IRenderAPI* render_api)
+{
+    auto* terrain = registry.try_get<TerrainComponent>(e);
+    if (!terrain || terrain->heightmap_path.empty())
+        return;
+
+    const std::string resolved_heightmap =
+        Assets::AssetManager::get().resolveAssetPath(terrain->heightmap_path);
+    const bool use_gpu_displacement =
+        terrain->gpu_displacement && render_api && render_api->supportsHeightmapDisplacement();
+
+    Assets::TerrainBuildResult terrain_mesh =
+        Assets::TerrainBuilder::buildFromHeightmap(*terrain, resolved_heightmap, use_gpu_displacement);
+    if (!terrain_mesh.success || !terrain_mesh.render_mesh)
+    {
+        LOG_ENGINE_ERROR("Entity '{}': failed to build terrain: {}",
+                         entity_data.name, terrain_mesh.error_message);
+        return;
+    }
+
+    auto render_mesh = terrain_mesh.render_mesh;
+    if (!terrain->albedo_path.empty() && render_api)
+    {
+        const std::string resolved_albedo =
+            Assets::AssetManager::get().resolveAssetPath(terrain->albedo_path);
+        const TextureHandle albedo = render_api->loadTexture(resolved_albedo, false, true);
+        render_mesh->set_texture(albedo);
+    }
+
+    if (use_gpu_displacement && render_api)
+    {
+        const TextureHandle height_texture = render_api->loadTexture(resolved_heightmap, false, false);
+        render_mesh->heightmap_displacement = height_texture != INVALID_TEXTURE;
+        render_mesh->heightmap_texture = height_texture;
+        render_mesh->heightmap_height_scale = terrain->height_scale;
+        render_mesh->heightmap_height_offset = terrain->height_offset;
+        render_mesh->heightmap_texel_size = glm::vec2(
+            terrain_mesh.heightmap_width > 0 ? 1.0f / static_cast<float>(terrain_mesh.heightmap_width) : 0.0f,
+            terrain_mesh.heightmap_height > 0 ? 1.0f / static_cast<float>(terrain_mesh.heightmap_height) : 0.0f);
+    }
+
+    if (render_api && render_mesh->is_valid && !render_mesh->isUploadedToGPU())
+        render_mesh->uploadToGPU(render_api);
+
+    auto& mesh_component = registry.get_or_emplace<MeshComponent>(e);
+    mesh_component.m_mesh = render_mesh;
+
+    if (terrain->generate_collision && terrain_mesh.collision_mesh)
+    {
+        auto& col = registry.get_or_emplace<ColliderComponent>(e);
+        col.shape_type = ColliderShapeType::Mesh;
+        col.m_mesh = terrain_mesh.collision_mesh;
+        col.friction = terrain->friction;
+        col.restitution = terrain->restitution;
+        LOG_ENGINE_INFO("Entity '{}': using heightmap terrain collision", entity_data.name);
+    }
+}
+
 static PhysicsSystem::PhysicsBodyDesc makeBodyDesc(const LevelEntity& entity_data, const ColliderComponent& col, bool player_body = false)
 {
     PhysicsSystem::PhysicsBodyDesc desc;
@@ -687,6 +749,11 @@ static std::shared_ptr<mesh> makeMeshInstanceView(const std::shared_ptr<mesh>& r
     instance->owns_gpu_mesh = false;
     instance->texture = resource->texture;
     instance->texture_set = resource->texture_set;
+    instance->heightmap_displacement = resource->heightmap_displacement;
+    instance->heightmap_texture = resource->heightmap_texture;
+    instance->heightmap_height_scale = resource->heightmap_height_scale;
+    instance->heightmap_height_offset = resource->heightmap_height_offset;
+    instance->heightmap_texel_size = resource->heightmap_texel_size;
     instance->material_ranges = resource->material_ranges;
     instance->uses_material_ranges = resource->uses_material_ranges;
     instance->load_state.store(resource->load_state.load(std::memory_order_acquire),
@@ -2937,6 +3004,7 @@ bool LevelManager::instantiateLevelParallel(
 
         setupLevelColliderComponent(game_world.registry, e, entity_data, getOrFinalizeMesh);
         deserializeReflectedComponents(m_reflection, game_world.registry, e, entity_data.reflected_components);
+        setupLevelTerrainComponent(game_world.registry, e, entity_data, render_api);
         createLevelPhysicsBody(game_world, e, entity_data);
 
         // Player

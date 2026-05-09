@@ -1,15 +1,22 @@
+#include "Assets/TerrainBuilder.hpp"
 #include "Assets/AssetManager.hpp"
 #include "Components/Components.hpp"
 #include "Graphics/HeadlessRenderAPI.hpp"
 #include "LevelManager.hpp"
 #include "PhysicsSystem.hpp"
+#include "Reflection/EngineReflection.hpp"
+#include "Reflection/ReflectionRegistry.hpp"
 #include "Utils/Log.hpp"
 #include "world.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -43,6 +50,87 @@ static bool pass(const std::string& name)
 {
     std::cout << "[PASS] " << name << std::endl;
     return true;
+}
+
+static void appendLe16(std::vector<std::uint8_t>& out, std::uint16_t value)
+{
+    out.push_back(static_cast<std::uint8_t>(value & 0xff));
+    out.push_back(static_cast<std::uint8_t>((value >> 8) & 0xff));
+}
+
+static void appendLe32(std::vector<std::uint8_t>& out, std::uint32_t value)
+{
+    out.push_back(static_cast<std::uint8_t>(value & 0xff));
+    out.push_back(static_cast<std::uint8_t>((value >> 8) & 0xff));
+    out.push_back(static_cast<std::uint8_t>((value >> 16) & 0xff));
+    out.push_back(static_cast<std::uint8_t>((value >> 24) & 0xff));
+}
+
+static bool writeTestHeightmapBmp(const fs::path& path)
+{
+    constexpr int width = 4;
+    constexpr int height = 4;
+    const int row_stride = ((width * 3 + 3) / 4) * 4;
+    const std::uint32_t pixel_bytes = static_cast<std::uint32_t>(row_stride * height);
+    const std::uint32_t file_size = 14 + 40 + pixel_bytes;
+
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(file_size);
+    bytes.push_back('B');
+    bytes.push_back('M');
+    appendLe32(bytes, file_size);
+    appendLe16(bytes, 0);
+    appendLe16(bytes, 0);
+    appendLe32(bytes, 54);
+    appendLe32(bytes, 40);
+    appendLe32(bytes, width);
+    appendLe32(bytes, height);
+    appendLe16(bytes, 1);
+    appendLe16(bytes, 24);
+    appendLe32(bytes, 0);
+    appendLe32(bytes, pixel_bytes);
+    appendLe32(bytes, 2835);
+    appendLe32(bytes, 2835);
+    appendLe32(bytes, 0);
+    appendLe32(bytes, 0);
+
+    std::vector<std::uint8_t> pixels(pixel_bytes, 0);
+    for (int y = 0; y < height; ++y)
+    {
+        const int bmp_y = height - 1 - y;
+        for (int x = 0; x < width; ++x)
+        {
+            const std::uint8_t v = static_cast<std::uint8_t>(((x + y) * 255) / (width + height - 2));
+            const int offset = bmp_y * row_stride + x * 3;
+            pixels[offset + 0] = v;
+            pixels[offset + 1] = v;
+            pixels[offset + 2] = v;
+        }
+    }
+    bytes.insert(bytes.end(), pixels.begin(), pixels.end());
+
+    fs::create_directories(path.parent_path());
+    std::ofstream file(path, std::ios::binary);
+    if (!file)
+        return false;
+    file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    return file.good();
+}
+
+static float meshMaxY(const mesh& m)
+{
+    float max_y = -1000000.0f;
+    for (size_t i = 0; i < m.vertices_len; ++i)
+        max_y = std::max(max_y, m.vertices[i].vy);
+    return max_y;
+}
+
+static float meshMinY(const mesh& m)
+{
+    float min_y = 1000000.0f;
+    for (size_t i = 0; i < m.vertices_len; ++i)
+        min_y = std::min(min_y, m.vertices[i].vy);
+    return min_y;
 }
 
 static float horizontalSpeed(const glm::vec3& v)
@@ -471,6 +559,130 @@ static bool testUseMeshCollisionCreatesBody(const fs::path& repo_root)
     return pass(name);
 }
 
+static bool testTerrainBuilderHeightmapMesh(const fs::path& repo_root)
+{
+    const std::string name = "terrain builder heightmap mesh";
+    const fs::path heightmap_path = repo_root / "build" / "test_assets" / "terrain_heightmap.bmp";
+    if (!writeTestHeightmapBmp(heightmap_path))
+        return fail(name, "failed to write test heightmap");
+
+    TerrainComponent terrain;
+    terrain.width = 4.0f;
+    terrain.depth = 4.0f;
+    terrain.height_scale = 3.0f;
+    terrain.height_offset = -1.0f;
+    terrain.sample_step = 1;
+
+    Assets::TerrainBuildResult cpu_result =
+        Assets::TerrainBuilder::buildFromHeightmap(terrain, heightmap_path.string(), false);
+    if (!cpu_result.success)
+        return fail(name, cpu_result.error_message);
+    if (!cpu_result.render_mesh || !cpu_result.collision_mesh)
+        return fail(name, "builder did not return both meshes");
+    if (cpu_result.render_mesh->vertices_len != 54)
+        return fail(name, "unexpected terrain triangle count");
+    if (meshMaxY(*cpu_result.render_mesh) <= meshMinY(*cpu_result.render_mesh))
+        return fail(name, "CPU render mesh was not displaced");
+
+    Assets::TerrainBuildResult gpu_result =
+        Assets::TerrainBuilder::buildFromHeightmap(terrain, heightmap_path.string(), true);
+    if (!gpu_result.success)
+        return fail(name, gpu_result.error_message);
+    if (std::abs(meshMaxY(*gpu_result.render_mesh)) > 0.001f ||
+        std::abs(meshMinY(*gpu_result.render_mesh)) > 0.001f)
+        return fail(name, "GPU-displaced render mesh should stay flat on CPU");
+    if (meshMaxY(*gpu_result.collision_mesh) <= meshMinY(*gpu_result.collision_mesh))
+        return fail(name, "collision mesh was not displaced");
+    if (gpu_result.render_mesh->aabb_max.y < 1.9f)
+        return fail(name, "render mesh bounds did not include displaced height");
+
+    return pass(name);
+}
+
+static bool testLevelTerrainCreatesMeshAndCollision(const fs::path& repo_root)
+{
+    const std::string name = "level terrain creates mesh and collision";
+    const fs::path asset_root = repo_root / "build" / "test_assets";
+    const fs::path heightmap_path = asset_root / "terrain_level_heightmap.bmp";
+    if (!writeTestHeightmapBmp(heightmap_path))
+        return fail(name, "failed to write test heightmap");
+
+    HeadlessRenderAPI render_api;
+    Assets::AssetManager::get().setAssetRoot(asset_root.string());
+    Assets::AssetManager::get().setAssetPrefix("assets");
+    Assets::AssetManager::get().initialize(&render_api);
+
+    LevelData data;
+    data.metadata.level_name = "TerrainLevelTest";
+    data.entities.clear();
+
+    LevelEntity terrain_entity;
+    terrain_entity.name = "terrain";
+    terrain_entity.type = EntityType::Static;
+    terrain_entity.reflected_components = nlohmann::json::object({
+        {"TerrainComponent", nlohmann::json::object({
+            {"heightmap_path", "assets/terrain_level_heightmap.bmp"},
+            {"width", 6.0f},
+            {"depth", 6.0f},
+            {"height_scale", 2.0f},
+            {"height_offset", 0.0f},
+            {"sample_step", 1},
+            {"gpu_displacement", true},
+            {"generate_collision", true},
+            {"friction", 0.8f},
+            {"restitution", 0.0f}
+        })}
+    });
+    data.entities.push_back(terrain_entity);
+
+    world w;
+    w.initializePhysics();
+
+    ReflectionRegistry reflection;
+    registerEngineReflection(reflection);
+
+    LevelManager level_manager;
+    level_manager.setReflectionRegistry(&reflection);
+    if (!level_manager.instantiateLevel(data, w, &render_api))
+        return fail(name, "instantiateLevel returned false");
+
+    entt::entity terrain = entt::null;
+    auto tags = w.registry.view<TagComponent>();
+    for (auto entity : tags)
+    {
+        if (tags.get<TagComponent>(entity).name == "terrain")
+        {
+            terrain = entity;
+            break;
+        }
+    }
+
+    if (terrain == entt::null)
+        return fail(name, "terrain entity was not created");
+    if (!w.registry.all_of<MeshComponent>(terrain))
+        return fail(name, "terrain has no MeshComponent");
+    if (!w.registry.all_of<ColliderComponent>(terrain))
+        return fail(name, "terrain has no ColliderComponent");
+    if (!w.getPhysicsSystem().hasBody(terrain))
+        return fail(name, "terrain collider did not create a physics body");
+
+    const auto& mesh_component = w.registry.get<MeshComponent>(terrain);
+    if (!mesh_component.m_mesh || mesh_component.m_mesh->vertices_len == 0)
+        return fail(name, "terrain render mesh is empty");
+
+    const auto& collider = w.registry.get<ColliderComponent>(terrain);
+    if (collider.shape_type != ColliderShapeType::Mesh || !collider.is_mesh_valid())
+        return fail(name, "terrain collider is not a valid mesh collider");
+
+    glm::vec3 hit_point, hit_normal;
+    if (!w.raycast(glm::vec3(0.0f, 8.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), 20.0f, hit_point, hit_normal))
+        return fail(name, "downward raycast did not hit terrain collider");
+    if (hit_normal.y < 0.4f)
+        return fail(name, "terrain hit normal is not sufficiently upward");
+
+    return pass(name);
+}
+
 static bool testRaycastClosestCanIgnoreShooterBody()
 {
     const std::string name = "raycast closest ignores shooter body";
@@ -562,6 +774,32 @@ static bool testFpsShooterLevelReferences(const fs::path& repo_root)
         }
     }
 
+    LevelData terrain_level;
+    fs::path terrain_path = repo_root / "Templates" / "FPSShooter" / "assets" / "levels" / "terrain_showcase.level.json";
+    if (!level_manager.loadLevel(terrain_path.string(), terrain_level))
+        return fail(name, "failed to parse terrain_showcase.level.json");
+
+    bool saw_terrain = false;
+    for (const LevelEntity& entity : terrain_level.entities)
+    {
+        const auto& components = entity.reflected_components;
+        if (!components.is_object() || !components.contains("TerrainComponent"))
+            continue;
+
+        saw_terrain = true;
+        const auto& terrain = components["TerrainComponent"];
+        for (const char* key : {"heightmap_path", "albedo_path"})
+        {
+            if (!terrain.contains(key) || !terrain[key].is_string() || terrain[key].get<std::string>().empty())
+                return fail(name, std::string("terrain showcase missing ") + key);
+            const std::string resolved = Assets::AssetManager::get().resolveAssetPath(terrain[key].get<std::string>());
+            if (!fs::exists(resolved))
+                return fail(name, std::string("missing terrain asset: ") + terrain[key].get<std::string>());
+        }
+    }
+    if (!saw_terrain)
+        return fail(name, "terrain showcase has no TerrainComponent");
+
     return pass(name);
 }
 
@@ -592,6 +830,10 @@ int main()
     ok = testLevelPlayerCreatesCharacterController() && ok;
     run("use_mesh_collision creates body");
     ok = testUseMeshCollisionCreatesBody(repo_root) && ok;
+    run("terrain builder heightmap mesh");
+    ok = testTerrainBuilderHeightmapMesh(repo_root) && ok;
+    run("level terrain creates mesh and collision");
+    ok = testLevelTerrainCreatesMeshAndCollision(repo_root) && ok;
     run("raycast closest ignores shooter body");
     ok = testRaycastClosestCanIgnoreShooterBody() && ok;
     run("FPSShooter level references");

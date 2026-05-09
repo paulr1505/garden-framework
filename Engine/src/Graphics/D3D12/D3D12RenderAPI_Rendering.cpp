@@ -83,7 +83,9 @@ namespace
         UINT first_vertex = 0;
         ID3D12PipelineState* pso = nullptr;
         D3D12_GPU_DESCRIPTOR_HANDLE diffuse_srv = {};
+        D3D12_GPU_DESCRIPTOR_HANDLE heightmap_srv = {};
         bool has_diffuse_srv = false;
+        bool has_heightmap_srv = false;
         D3D12PerObjectCBuffer object_cb = {};
     };
 }
@@ -309,9 +311,11 @@ TextureHandle D3D12RenderAPI::loadTextureFromMemory(const uint8_t* pixels, int w
 
     uploadBuffer->Unmap(0, nullptr);
 
-    // Track staging buffer and schedule transition on graphics queue
+    // Track staging buffer and schedule transition on graphics queue.
+    // Textures can now be sampled by vertex shaders for heightmap displacement.
     m_copyQueue.retainStagingBuffer(std::move(uploadBuffer));
-    m_copyQueue.addPendingTransition(tex.resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    m_copyQueue.addPendingTransition(tex.resource.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     // Create SRV
     tex.srvIndex = m_srvAllocator.allocate();
@@ -476,9 +480,11 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
 
     uploadBuffer->Unmap(0, nullptr);
 
-    // Track staging buffer and schedule transition on graphics queue
+    // Track staging buffer and schedule transition on graphics queue.
+    // Textures can now be sampled by vertex shaders for heightmap displacement.
     m_copyQueue.retainStagingBuffer(std::move(uploadBuffer));
-    m_copyQueue.addPendingTransition(tex.resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    m_copyQueue.addPendingTransition(tex.resource.Get(),
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     // Create SRV
     tex.srvIndex = m_srvAllocator.allocate();
@@ -531,6 +537,24 @@ void D3D12RenderAPI::bindTexture(TextureHandle texture)
     {
         unbindTexture();
     }
+}
+
+void D3D12RenderAPI::bindHeightmapTexture(TextureHandle texture)
+{
+    TextureHandle textureToBind = texture != INVALID_TEXTURE ? texture : defaultTexture;
+    if (textureToBind == INVALID_TEXTURE)
+        return;
+
+    UINT srvIndex = UINT(-1);
+    {
+        std::lock_guard<std::mutex> lock(m_textureMutex);
+        auto it = textures.find(textureToBind);
+        if (it != textures.end())
+            srvIndex = it->second.srvIndex;
+    }
+
+    if (srvIndex != UINT(-1))
+        commandList->SetGraphicsRootDescriptorTable(11, m_srvAllocator.getGPU(srvIndex));
 }
 
 void D3D12RenderAPI::unbindTexture()
@@ -588,7 +612,11 @@ void D3D12RenderAPI::renderMesh(const mesh& m, const RenderState& state)
     if (in_shadow_pass)
     {
         // Shadow pass: just update shadow CBuffer and draw
-        updateShadowCBuffer(lightSpaceMatrices[currentCascade], current_model_matrix);
+        updateShadowCBuffer(lightSpaceMatrices[currentCascade], current_model_matrix,
+                            m.heightmap_displacement && m.heightmap_texture != INVALID_TEXTURE,
+                            m.heightmap_height_scale, m.heightmap_height_offset,
+                            m.heightmap_texel_size);
+        bindHeightmapTexture(m.heightmap_texture);
 
         commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
         if (gpuMesh->isIndexed())
@@ -611,7 +639,20 @@ void D3D12RenderAPI::renderMesh(const mesh& m, const RenderState& state)
     }
 
     bool useTexture = (m.texture != INVALID_TEXTURE);
-    updatePerObjectCBuffer(state.color, useTexture);
+    glm::mat3 normalMat3 = glm::mat3(current_model_matrix);
+    float det = glm::determinant(normalMat3);
+    glm::mat4 normalMatrix = (std::abs(det) > 1e-6f)
+        ? glm::mat4(glm::transpose(glm::inverse(normalMat3)))
+        : glm::mat4(1.0f);
+    auto objAddr = uploadPerObjectCBuffer(current_model_matrix, normalMatrix,
+                                          state.color, useTexture, 0.0f,
+                                          0.0f, 0.5f, glm::vec3(0.0f),
+                                          m.heightmap_displacement && m.heightmap_texture != INVALID_TEXTURE,
+                                          m.heightmap_height_scale,
+                                          m.heightmap_height_offset,
+                                          m.heightmap_texel_size);
+    if (objAddr == 0) return;
+    commandList->SetGraphicsRootConstantBufferView(1, objAddr);
 
     // Upload light data once per frame, reuse cached address for subsequent meshes
     if (m_cachedLightCBAddr == 0)
@@ -635,6 +676,7 @@ void D3D12RenderAPI::renderMesh(const mesh& m, const RenderState& state)
         bindTexture(m.texture);
     else if (defaultTexture != INVALID_TEXTURE)
         bindTexture(defaultTexture);
+    bindHeightmapTexture(m.heightmap_texture);
 
     // Bind default PBR textures (root params 5-8)
     if (m_defaultMetallicRoughnessTexture.srvIndex != UINT(-1))
@@ -672,7 +714,11 @@ void D3D12RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
 
     if (in_shadow_pass)
     {
-        updateShadowCBuffer(lightSpaceMatrices[currentCascade], current_model_matrix);
+        updateShadowCBuffer(lightSpaceMatrices[currentCascade], current_model_matrix,
+                            m.heightmap_displacement && m.heightmap_texture != INVALID_TEXTURE,
+                            m.heightmap_height_scale, m.heightmap_height_offset,
+                            m.heightmap_texel_size);
+        bindHeightmapTexture(m.heightmap_texture);
         commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
         if (gpuMesh->isIndexed())
         {
@@ -694,7 +740,20 @@ void D3D12RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
         global_cbuffer_dirty = false;
     }
 
-    updatePerObjectCBuffer(state.color, true);
+    glm::mat3 normalMat3 = glm::mat3(current_model_matrix);
+    float det = glm::determinant(normalMat3);
+    glm::mat4 normalMatrix = (std::abs(det) > 1e-6f)
+        ? glm::mat4(glm::transpose(glm::inverse(normalMat3)))
+        : glm::mat4(1.0f);
+    auto objAddr = uploadPerObjectCBuffer(current_model_matrix, normalMatrix,
+                                          state.color, true, state.alpha_cutoff,
+                                          0.0f, 0.5f, glm::vec3(0.0f),
+                                          m.heightmap_displacement && m.heightmap_texture != INVALID_TEXTURE,
+                                          m.heightmap_height_scale,
+                                          m.heightmap_height_offset,
+                                          m.heightmap_texel_size);
+    if (objAddr == 0) return;
+    commandList->SetGraphicsRootConstantBufferView(1, objAddr);
 
     // Upload light data once per frame, reuse cached address for subsequent meshes
     if (m_cachedLightCBAddr == 0)
@@ -711,6 +770,12 @@ void D3D12RenderAPI::renderMeshRange(const mesh& m, size_t start_vertex, size_t 
         commandList->SetPipelineState(pso);
         last_bound_pso = pso;
     }
+
+    if (m.texture_set && m.texture != INVALID_TEXTURE)
+        bindTexture(m.texture);
+    else if (defaultTexture != INVALID_TEXTURE)
+        bindTexture(defaultTexture);
+    bindHeightmapTexture(m.heightmap_texture);
 
     commandList->IASetVertexBuffers(0, 1, &gpuMesh->getVertexBufferView());
     if (gpuMesh->isIndexed())
@@ -795,6 +860,7 @@ void D3D12RenderAPI::flushAndReopenCommandList()
         commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
     if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
         commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
+    bindHeightmapTexture(INVALID_TEXTURE);
 
     // Force rebind of PSO and texture
     last_bound_pso = nullptr;
@@ -910,6 +976,10 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
         item.object_cb.hasNormalMap = 0;
         item.object_cb.hasOcclusionMap = 0;
         item.object_cb.hasEmissiveMap = 0;
+        item.object_cb.useHeightmapDisplacement = cmd.use_heightmap_displacement ? 1 : 0;
+        item.object_cb.heightmapHeightScale = cmd.heightmap_height_scale;
+        item.object_cb.heightmapHeightOffset = cmd.heightmap_height_offset;
+        item.object_cb.heightmapTexelSize = cmd.heightmap_texel_size;
 
         item.pso = m_replayPSOOverride;
         if (!item.pso)
@@ -929,6 +999,13 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
         {
             item.diffuse_srv = resolveTextureSRV(texToBind);
             item.has_diffuse_srv = item.diffuse_srv.ptr != 0;
+        }
+        TextureHandle heightTexToBind = cmd.use_heightmap_displacement
+            ? cmd.heightmap_texture : defaultTex;
+        if (heightTexToBind != INVALID_TEXTURE)
+        {
+            item.heightmap_srv = resolveTextureSRV(heightTexToBind);
+            item.has_heightmap_srv = item.heightmap_srv.ptr != 0;
         }
 
         replayItems.push_back(item);
@@ -1032,6 +1109,7 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                 // Replay this worker's chunk of commands
                 ID3D12PipelineState* workerLastPSO = nullptr;
                 D3D12_GPU_DESCRIPTOR_HANDLE workerLastSrv = {};
+                D3D12_GPU_DESCRIPTOR_HANDLE workerLastHeightSrv = {};
 
                 for (size_t i = workers[w].start; i < workers[w].end; i++)
                 {
@@ -1050,6 +1128,11 @@ void D3D12RenderAPI::replayCommandBufferParallel(const RenderCommandBuffer& cmds
                     {
                         cmdList->SetGraphicsRootDescriptorTable(2, item.diffuse_srv);
                         workerLastSrv = item.diffuse_srv;
+                    }
+                    if (item.has_heightmap_srv && item.heightmap_srv.ptr != workerLastHeightSrv.ptr)
+                    {
+                        cmdList->SetGraphicsRootDescriptorTable(11, item.heightmap_srv);
+                        workerLastHeightSrv = item.heightmap_srv;
                     }
 
                     cmdList->IASetVertexBuffers(0, 1, &item.vbv);
@@ -1112,6 +1195,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             commandList->SetGraphicsRootDescriptorTable(7, m_srvAllocator.getGPU(m_defaultOcclusionTexture.srvIndex));
         if (m_defaultEmissiveTexture.srvIndex != UINT(-1))
             commandList->SetGraphicsRootDescriptorTable(8, m_srvAllocator.getGPU(m_defaultEmissiveTexture.srvIndex));
+        bindHeightmapTexture(INVALID_TEXTURE);
     }
 
     for (const auto& cmd : cmds)
@@ -1129,13 +1213,23 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
                 commandList->SetPipelineState(m_psoShadowAlphaTest.Get());
                 // Alpha-test shadow needs per-object CB (for alphaCutoff) and texture
                 auto objAddr = uploadPerObjectCBuffer(cmd.model_matrix, cmd.normal_matrix,
-                                                       glm::vec3(1.0f), true, cmd.alpha_cutoff);
+                                                       glm::vec3(1.0f), true, cmd.alpha_cutoff,
+                                                       0.0f, 0.5f, glm::vec3(0.0f),
+                                                       cmd.use_heightmap_displacement,
+                                                       cmd.heightmap_height_scale,
+                                                       cmd.heightmap_height_offset,
+                                                       cmd.heightmap_texel_size);
                 if (objAddr == 0) continue;
                 commandList->SetGraphicsRootConstantBufferView(1, objAddr);
                 if (cmd.use_texture && cmd.texture != INVALID_TEXTURE)
                     bindTexture(cmd.texture);
             }
-            updateShadowCBuffer(lightSpaceMatrices[currentCascade], cmd.model_matrix);
+            bindHeightmapTexture(cmd.use_heightmap_displacement ? cmd.heightmap_texture : INVALID_TEXTURE);
+            updateShadowCBuffer(lightSpaceMatrices[currentCascade], cmd.model_matrix,
+                                cmd.use_heightmap_displacement,
+                                cmd.heightmap_height_scale,
+                                cmd.heightmap_height_offset,
+                                cmd.heightmap_texel_size);
 
             bindingCache.bindMesh(commandList.Get(), gpuMesh);
             if (gpuMesh->isIndexed())
@@ -1182,9 +1276,15 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             auto objAddr = uploadPerObjectCBuffer(cmd.model_matrix, cmd.normal_matrix,
                                                    glm::vec3(1.0f),
                                                    cmd.pso_key.alpha_test && cmd.use_texture,
-                                                   cmd.alpha_cutoff);
+                                                   cmd.alpha_cutoff,
+                                                   0.0f, 0.5f, glm::vec3(0.0f),
+                                                   cmd.use_heightmap_displacement,
+                                                   cmd.heightmap_height_scale,
+                                                   cmd.heightmap_height_offset,
+                                                   cmd.heightmap_texel_size);
             if (objAddr == 0) continue;
             commandList->SetGraphicsRootConstantBufferView(1, objAddr);
+            bindHeightmapTexture(cmd.use_heightmap_displacement ? cmd.heightmap_texture : INVALID_TEXTURE);
 
             bindingCache.bindMesh(commandList.Get(), gpuMesh);
             if (gpuMesh->isIndexed())
@@ -1216,7 +1316,11 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
 
         auto objAddr = uploadPerObjectCBuffer(cmd.model_matrix, cmd.normal_matrix,
                                                cmd.color, cmd.use_texture, cmd.alpha_cutoff,
-                                               cmd.metallic, cmd.roughness, cmd.emissive);
+                                               cmd.metallic, cmd.roughness, cmd.emissive,
+                                               cmd.use_heightmap_displacement,
+                                               cmd.heightmap_height_scale,
+                                               cmd.heightmap_height_offset,
+                                               cmd.heightmap_texel_size);
         if (objAddr == 0) continue;
         commandList->SetGraphicsRootConstantBufferView(1, objAddr);
 
@@ -1255,6 +1359,7 @@ void D3D12RenderAPI::replayCommandBuffer(const RenderCommandBuffer& cmds)
             bindTexture(cmd.texture);
         else if (defaultTexture != INVALID_TEXTURE)
             bindTexture(defaultTexture);
+        bindHeightmapTexture(cmd.use_heightmap_displacement ? cmd.heightmap_texture : INVALID_TEXTURE);
 
         bindingCache.bindMesh(commandList.Get(), gpuMesh);
         if (gpuMesh->isIndexed())

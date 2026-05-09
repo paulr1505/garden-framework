@@ -438,6 +438,7 @@ void VulkanRenderAPI::endSceneRender()
             cfg.height         = static_cast<uint32_t>(target.height);
             cfg.wantSSAO       = wantSSAO;
             cfg.wantShadowMask = wantShadowMask;
+            cfg.renderRml      = m_sceneRmlEnabled;
             cfg.renderImGui    = false;
 
             if (isDeferredActive())
@@ -505,6 +506,7 @@ void VulkanRenderAPI::endSceneRender()
         cfg.height         = static_cast<uint32_t>(viewport_height_rt);
         cfg.wantSSAO       = wantSSAO;
         cfg.wantShadowMask = wantShadowMask;
+        cfg.renderRml      = m_sceneRmlEnabled;
         cfg.renderImGui    = false;
 
         if (isDeferredActive())
@@ -638,7 +640,7 @@ void VulkanRenderAPI::endSceneRender()
                            viewport_fxaa_pipeline,
                            static_cast<uint32_t>(viewport_width_rt),
                            static_cast<uint32_t>(viewport_height_rt),
-                           wantSSAO, wantShadowMask, false);
+                           wantSSAO, wantShadowMask, m_sceneRmlEnabled, false);
         } else {
             // No FXAA: copy offscreen -> viewport via image copy
             // Transition offscreen: SHADER_READ_ONLY -> TRANSFER_SRC

@@ -1,4 +1,5 @@
 #include "D3D12RenderAPI.hpp"
+#include "UI/RmlUiManager.h"
 #include "Utils/Log.hpp"
 #include "imgui.h"
 #include "imgui_impl_dx12.h"
@@ -83,6 +84,7 @@ void D3D12RenderAPI::endSceneRender()
                 cfg.wantSSAO       = wantSSAO;
                 cfg.wantShadowMask = wantShadowMask;
                 cfg.renderImGui    = false;
+                cfg.renderRml      = m_sceneRmlEnabled;
 
                 if (isDeferredActive())
                     cfg.wantShadowMask = false;
@@ -113,6 +115,11 @@ void D3D12RenderAPI::endSceneRender()
 
                 D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(pie.getOutputRTV());
                 renderFXAAPass(rtvHandle, pie.getHDRSRV(), pie.width(), pie.height(), false, false);
+                if (m_sceneRmlEnabled)
+                {
+                    RmlUiManager::get().beginFrame(pie.width(), pie.height());
+                    RmlUiManager::get().render();
+                }
 
                 transitionResource(pie.getHDR(), {},
                                    D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -142,6 +149,7 @@ void D3D12RenderAPI::endSceneRender()
             cfg.wantSSAO       = wantSSAO;
             cfg.wantShadowMask = wantShadowMask;
             cfg.renderImGui    = false;
+            cfg.renderRml      = m_sceneRmlEnabled;
 
             if (isDeferredActive())
                 cfg.wantShadowMask = false;
@@ -177,6 +185,11 @@ void D3D12RenderAPI::endSceneRender()
 
             D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvAllocator.getCPU(vp.getOutputRTV());
             renderFXAAPass(rtvHandle, vp.getHDRSRV(), viewport_width_rt, viewport_height_rt, wantSSAO, wantShadowMask);
+            if (m_sceneRmlEnabled)
+            {
+                RmlUiManager::get().beginFrame(viewport_width_rt, viewport_height_rt);
+                RmlUiManager::get().render();
+            }
 
             transitionResource(vp.getOutput(), {}, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             transitionResource(vp.getHDR(),    {}, D3D12_RESOURCE_STATE_RENDER_TARGET);

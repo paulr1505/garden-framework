@@ -112,10 +112,18 @@ bool VulkanRenderAPI::createDescriptorSetLayout()
     instanceDataBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     instanceDataBinding.pImmutableSamplers = nullptr;
 
-    std::array<VkDescriptorSetLayoutBinding, 12> bindings = {
+    // Binding 13: heightmap texture sampled by vertex shaders for terrain displacement.
+    VkDescriptorSetLayoutBinding heightmapBinding{};
+    heightmapBinding.binding = 13;
+    heightmapBinding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    heightmapBinding.descriptorCount = 1;
+    heightmapBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    heightmapBinding.pImmutableSamplers = nullptr;
+
+    std::array<VkDescriptorSetLayoutBinding, 13> bindings = {
         uboLayoutBinding, samplerLayoutBinding, shadowMapBinding, lightUboBinding, perObjectUboBinding,
         metallicRoughnessBinding, normalMapBinding, occlusionBinding, emissiveBinding,
-        pointLightsBinding, spotLightsBinding, instanceDataBinding
+        pointLightsBinding, spotLightsBinding, instanceDataBinding, heightmapBinding
     };
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};

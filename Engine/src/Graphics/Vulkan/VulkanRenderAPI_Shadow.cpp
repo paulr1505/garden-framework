@@ -288,16 +288,17 @@ bool VulkanRenderAPI::createShadowResources()
     // descriptor layout that includes both binding 0 (ShadowCB) and
     // binding 1 (BoneCB), or extend this layout.
 
-    // Create shadow pipeline layout with push constant for per-draw model matrix
+    // Create shadow pipeline layout with the main descriptor layout so terrain
+    // draws can bind their heightmap texture in the shadow vertex shader.
     VkPushConstantRange shadowPushRange{};
     shadowPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     shadowPushRange.offset = 0;
-    shadowPushRange.size = 2 * sizeof(glm::mat4); // 128 bytes: lightSpaceMatrix + model
+    shadowPushRange.size = sizeof(VulkanShadowPushConstants);
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &shadow_descriptor_layout;
+    pipelineLayoutInfo.pSetLayouts = &descriptor_set_layout;
     pipelineLayoutInfo.pushConstantRangeCount = 1;
     pipelineLayoutInfo.pPushConstantRanges = &shadowPushRange;
 
@@ -334,12 +335,16 @@ bool VulkanRenderAPI::createShadowResources()
     bindingDesc.stride = sizeof(vertex);
     bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    // Shadow shader only reads position -- omit normal/texcoord to avoid validation warnings
-    std::array<VkVertexInputAttributeDescription, 1> attrDesc{};
+    // Shadow shader reads position and texcoord when heightmap displacement is enabled.
+    std::array<VkVertexInputAttributeDescription, 2> attrDesc{};
     attrDesc[0].binding = 0;
     attrDesc[0].location = 0;
     attrDesc[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     attrDesc[0].offset = offsetof(vertex, vx);
+    attrDesc[1].binding = 0;
+    attrDesc[1].location = 2;
+    attrDesc[1].format = VK_FORMAT_R32G32_SFLOAT;
+    attrDesc[1].offset = offsetof(vertex, u);
 
     VkPipelineBuilder builder(device, vk_pipeline_cache);
     builder.setShaders(vertModule, fragModule)
@@ -376,7 +381,7 @@ bool VulkanRenderAPI::createShadowResources()
                 VkPushConstantRange atPushRange{};
                 atPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
                 atPushRange.offset = 0;
-                atPushRange.size = 2 * sizeof(glm::mat4) + sizeof(float);
+                atPushRange.size = sizeof(VulkanShadowAlphaPushConstants);
 
                 VkPipelineLayoutCreateInfo atLayoutInfo{};
                 atLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -710,9 +715,9 @@ void VulkanRenderAPI::beginCascade(int cascadeIndex)
     last_bound_descriptor_set = VK_NULL_HANDLE;
     last_bound_vertex_buffer = VK_NULL_HANDLE;
 
-    // Bind shadow descriptor set
-    vkCmdBindDescriptorSets(command_buffers[current_frame], VK_PIPELINE_BIND_POINT_GRAPHICS,
-        shadow_pipeline_layout, 0, 1, &shadow_descriptor_sets[current_frame], 0, nullptr);
+    // Per-draw shadow descriptor sets are bound during replay because terrain
+    // draws can use different heightmap textures.
+    last_bound_descriptor_set = VK_NULL_HANDLE;
 
     // Push light space matrix for this cascade (offset 0, size 64)
     vkCmdPushConstants(command_buffers[current_frame], shadow_pipeline_layout,

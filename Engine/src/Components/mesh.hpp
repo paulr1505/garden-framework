@@ -98,6 +98,12 @@ public:
     bool transparent;
     bool casts_shadow;
 
+    bool heightmap_displacement = false;
+    TextureHandle heightmap_texture = INVALID_TEXTURE;
+    float heightmap_height_scale = 1.0f;
+    float heightmap_height_offset = 0.0f;
+    glm::vec2 heightmap_texel_size = glm::vec2(0.0f);
+
     // Async loading support (atomic for thread-safe read from worker threads)
     std::atomic<MeshLoadState> load_state{MeshLoadState::NotLoaded};
     Assets::AssetHandle asset_handle;
@@ -164,6 +170,11 @@ public:
         culling = true;
         transparent = false;
         casts_shadow = true;
+        heightmap_displacement = false;
+        heightmap_texture = INVALID_TEXTURE;
+        heightmap_height_scale = 1.0f;
+        heightmap_height_offset = 0.0f;
+        heightmap_texel_size = glm::vec2(0.0f);
         texture_set = false;
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
@@ -186,6 +197,11 @@ public:
         culling = true;
         transparent = false;
         casts_shadow = true;
+        heightmap_displacement = false;
+        heightmap_texture = INVALID_TEXTURE;
+        heightmap_height_scale = 1.0f;
+        heightmap_height_offset = 0.0f;
+        heightmap_texel_size = glm::vec2(0.0f);
         texture_set = false;
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
@@ -213,6 +229,11 @@ public:
         culling = true;
         transparent = false;
         casts_shadow = true;
+        heightmap_displacement = false;
+        heightmap_texture = INVALID_TEXTURE;
+        heightmap_height_scale = 1.0f;
+        heightmap_height_offset = 0.0f;
+        heightmap_texel_size = glm::vec2(0.0f);
         texture_set = false;
         texture = INVALID_TEXTURE;
         uses_material_ranges = false;
@@ -242,6 +263,12 @@ public:
         visible = other.visible;
         culling = other.culling;
         transparent = other.transparent;
+        casts_shadow = other.casts_shadow;
+        heightmap_displacement = other.heightmap_displacement;
+        heightmap_texture = other.heightmap_texture;
+        heightmap_height_scale = other.heightmap_height_scale;
+        heightmap_height_offset = other.heightmap_height_offset;
+        heightmap_texel_size = other.heightmap_texel_size;
         load_state.store(other.load_state.load(std::memory_order_relaxed), std::memory_order_relaxed);
         asset_handle = other.asset_handle;
         resource_owner = std::move(other.resource_owner);
@@ -262,6 +289,9 @@ public:
         other.bounds_computed = false;
         other.current_lod.store(0, std::memory_order_relaxed);
         other.force_lod = -1;
+        other.heightmap_displacement = false;
+        other.heightmap_texture = INVALID_TEXTURE;
+        other.heightmap_texel_size = glm::vec2(0.0f);
     }
 
     // Move assignment
@@ -287,6 +317,12 @@ public:
             visible = other.visible;
             culling = other.culling;
             transparent = other.transparent;
+            casts_shadow = other.casts_shadow;
+            heightmap_displacement = other.heightmap_displacement;
+            heightmap_texture = other.heightmap_texture;
+            heightmap_height_scale = other.heightmap_height_scale;
+            heightmap_height_offset = other.heightmap_height_offset;
+            heightmap_texel_size = other.heightmap_texel_size;
             load_state.store(other.load_state.load(std::memory_order_relaxed), std::memory_order_relaxed);
             asset_handle = other.asset_handle;
             resource_owner = std::move(other.resource_owner);
@@ -307,6 +343,9 @@ public:
             other.bounds_computed = false;
             other.current_lod.store(0, std::memory_order_relaxed);
             other.force_lod = -1;
+            other.heightmap_displacement = false;
+            other.heightmap_texture = INVALID_TEXTURE;
+            other.heightmap_texel_size = glm::vec2(0.0f);
         }
         return *this;
     }

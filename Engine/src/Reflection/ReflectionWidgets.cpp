@@ -1,9 +1,73 @@
 #include "ReflectionWidgets.hpp"
 #include "ReflectionPropertyOps.hpp"
+#include "Utils/FileDialog.hpp"
+#include <algorithm>
+#include <filesystem>
 #include <imgui.h>
 #include <glm/glm.hpp>
 #include <string>
 #include <cstring>
+#include <utility>
+
+namespace
+{
+    const char* assetPathDialogFilter(const PropertyDescriptor& prop)
+    {
+        if (prop.name.find("heightmap") != std::string::npos ||
+            prop.name.find("albedo") != std::string::npos ||
+            prop.name.find("texture") != std::string::npos)
+        {
+            return "Image Files (*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.hdr;*.dds)\0*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.hdr;*.dds\0All Files (*.*)\0*.*\0";
+        }
+
+        return "Asset Files (*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.hdr;*.dds;*.obj;*.gltf;*.glb)\0*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.hdr;*.dds;*.obj;*.gltf;*.glb\0All Files (*.*)\0*.*\0";
+    }
+
+    std::string normalizeDialogAssetPath(const std::string& path)
+    {
+        namespace fs = std::filesystem;
+
+        if (path.empty())
+            return path;
+
+        fs::path selected(path);
+        std::error_code ec;
+        if (!selected.is_absolute())
+            selected = fs::absolute(selected, ec);
+
+        if (!ec)
+        {
+            std::error_code canonical_ec;
+            fs::path canonical_selected = fs::weakly_canonical(selected, canonical_ec);
+            if (!canonical_ec)
+                selected = canonical_selected;
+
+            std::error_code cwd_ec;
+            fs::path cwd = fs::current_path(cwd_ec);
+            if (!cwd_ec)
+                cwd = fs::weakly_canonical(cwd, cwd_ec);
+            if (!cwd_ec)
+            {
+                std::error_code relative_ec;
+                fs::path relative = fs::relative(selected, cwd, relative_ec);
+                if (!relative_ec && !relative.empty())
+                {
+                    auto it = relative.begin();
+                    if (it == relative.end() || it->string() != "..")
+                    {
+                        std::string out = relative.string();
+                        std::replace(out.begin(), out.end(), '\\', '/');
+                        return out;
+                    }
+                }
+            }
+        }
+
+        std::string out = selected.string();
+        std::replace(out.begin(), out.end(), '\\', '/');
+        return out;
+    }
+}
 
 bool drawReflectedProperty(const PropertyDescriptor& prop, void* component,
                            bool* out_edit_started)
@@ -79,6 +143,63 @@ bool drawReflectedProperty(const PropertyDescriptor& prop, void* component,
             *val = buf;
             changed = true;
         }
+        break;
+    }
+    case EPropertyWidget::AssetPath:
+    {
+        auto* val = static_cast<std::string*>(field_ptr);
+        char buf[512];
+        std::strncpy(buf, val->c_str(), sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+
+        ImGui::PushID(label);
+
+        const char* button_label = "Open...";
+        const ImGuiStyle& style = ImGui::GetStyle();
+        const float button_w = ImGui::CalcTextSize(button_label).x + style.FramePadding.x * 2.0f;
+        const float input_w = std::max(64.0f, ImGui::CalcItemWidth() - button_w - style.ItemSpacing.x);
+
+        ImGui::SetNextItemWidth(input_w);
+        if (ImGui::InputText("##asset_path", buf, sizeof(buf)))
+        {
+            *val = buf;
+            changed = true;
+        }
+        bool asset_path_edit_started = ImGui::IsItemActivated();
+        const bool input_hovered = ImGui::IsItemHovered();
+
+        ImGui::SameLine();
+        bool button_clicked = ImGui::Button(button_label);
+        const bool button_hovered = ImGui::IsItemHovered();
+        if (button_clicked)
+        {
+            const std::string selected_path =
+                FileDialog::openFile("Select Asset", assetPathDialogFilter(prop));
+            if (!selected_path.empty())
+            {
+                std::string normalized_path = normalizeDialogAssetPath(selected_path);
+                if (*val != normalized_path)
+                {
+                    *val = std::move(normalized_path);
+                    changed = true;
+                    asset_path_edit_started = true;
+                }
+            }
+        }
+
+        ImGui::SameLine();
+        ImGui::TextUnformatted(label);
+
+        if (out_edit_started && asset_path_edit_started)
+            *out_edit_started = true;
+
+        if (!prop.meta.tooltip.empty() &&
+            (input_hovered || button_hovered || ImGui::IsItemHovered()))
+        {
+            ImGui::SetTooltip("%s", prop.meta.tooltip.c_str());
+        }
+
+        ImGui::PopID();
         break;
     }
     case EPropertyWidget::DragFloat2:

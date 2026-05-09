@@ -20,6 +20,7 @@ public:
 
     // Per-frame calls
     void beginFrame();
+    void beginFrame(int width, int height);
     void render();
 
     // Event handling - returns true if RmlUi consumed the event

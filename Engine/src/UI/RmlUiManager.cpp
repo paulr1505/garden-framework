@@ -285,23 +285,30 @@ void RmlUiManager::beginFrame()
     if (!m_initialized || !m_context)
         return;
 
-    // Update viewport dimensions
     int w, h;
     SDL_GetWindowSize(m_window, &w, &h);
-    m_context->SetDimensions(Rml::Vector2i(w, h));
+    beginFrame(w, h);
+}
+
+void RmlUiManager::beginFrame(int width, int height)
+{
+    if (!m_initialized || !m_context || width <= 0 || height <= 0)
+        return;
+
+    m_context->SetDimensions(Rml::Vector2i(width, height));
 
     // Update renderer viewport
     if (m_apiType == RenderAPIType::Vulkan)
     {
         auto* vkRenderer = static_cast<RmlRenderer_VK*>(m_renderInterface);
-        vkRenderer->SetViewport(w, h);
+        vkRenderer->SetViewport(width, height);
         vkRenderer->BeginFrame();
     }
 #ifdef _WIN32
     else if (m_apiType == RenderAPIType::D3D12)
     {
         auto* d3dRenderer = static_cast<RmlRenderer_D3D12*>(m_renderInterface);
-        d3dRenderer->SetViewport(w, h);
+        d3dRenderer->SetViewport(width, height);
         d3dRenderer->BeginFrame();
     }
 #endif
@@ -309,7 +316,7 @@ void RmlUiManager::beginFrame()
     else if (m_apiType == RenderAPIType::Metal)
     {
         auto* metalRenderer = static_cast<RmlRenderer_Metal*>(m_renderInterface);
-        metalRenderer->SetViewport(w, h);
+        metalRenderer->SetViewport(width, height);
         metalRenderer->BeginFrame();
     }
 #endif

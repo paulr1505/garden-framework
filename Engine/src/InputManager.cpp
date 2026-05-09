@@ -64,8 +64,8 @@ void InputManager::process_event(const SDL_Event& event)
         break;
 
     case SDL_EVENT_MOUSE_MOTION:
-        mouse_delta_x = event.motion.xrel;
-        mouse_delta_y = event.motion.yrel;
+        mouse_delta_x += event.motion.xrel;
+        mouse_delta_y += event.motion.yrel;
         break;
 
     case SDL_EVENT_MOUSE_BUTTON_DOWN:

@@ -4,6 +4,7 @@
 
 #include "D3D12RenderAPI.hpp"
 #include "Components/camera.hpp"
+#include "UI/RmlUiManager.h"
 #include "Utils/Log.hpp"
 #include "imgui.h"
 #include "imgui_impl_dx12.h"
@@ -207,6 +208,9 @@ void D3D12RenderAPI::endFrame()
                            wantSSAO, wantShadowMask);
 
             commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+            RmlUiManager::get().beginFrame(viewport_width, viewport_height);
+            RmlUiManager::get().render();
 
             // Render ImGui AFTER FXAA so UI text stays crisp (standalone mode only)
             ImDrawData* draw_data = ImGui::GetDrawData();
@@ -435,7 +439,11 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderAPI::uploadPerObjectCBuffer(const glm::mat4
                                                                   float alphaCutoff,
                                                                   float metallic,
                                                                   float roughness,
-                                                                  const glm::vec3& emissive)
+                                                                  const glm::vec3& emissive,
+                                                                  bool useHeightmapDisplacement,
+                                                                  float heightmapHeightScale,
+                                                                  float heightmapHeightOffset,
+                                                                  const glm::vec2& heightmapTexelSize)
 {
     D3D12PerObjectCBuffer cb = {};
     cb.model = model;
@@ -450,6 +458,10 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderAPI::uploadPerObjectCBuffer(const glm::mat4
     cb.hasNormalMap = 0;
     cb.hasOcclusionMap = 0;
     cb.hasEmissiveMap = 0;
+    cb.useHeightmapDisplacement = useHeightmapDisplacement ? 1 : 0;
+    cb.heightmapHeightScale = heightmapHeightScale;
+    cb.heightmapHeightOffset = heightmapHeightOffset;
+    cb.heightmapTexelSize = heightmapTexelSize;
 
     return m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
 }
@@ -467,11 +479,19 @@ void D3D12RenderAPI::updatePerObjectCBuffer(const glm::vec3& color, bool useText
     commandList->SetGraphicsRootConstantBufferView(1, addr);
 }
 
-void D3D12RenderAPI::updateShadowCBuffer(const glm::mat4& lightSpace, const glm::mat4& model)
+void D3D12RenderAPI::updateShadowCBuffer(const glm::mat4& lightSpace, const glm::mat4& model,
+                                         bool useHeightmapDisplacement,
+                                         float heightmapHeightScale,
+                                         float heightmapHeightOffset,
+                                         const glm::vec2& heightmapTexelSize)
 {
     D3D12ShadowCBuffer cb = {};
     cb.lightSpaceMatrix = lightSpace;
     cb.model = model;
+    cb.useHeightmapDisplacement = useHeightmapDisplacement ? 1 : 0;
+    cb.heightmapHeightScale = heightmapHeightScale;
+    cb.heightmapHeightOffset = heightmapHeightOffset;
+    cb.heightmapTexelSize = heightmapTexelSize;
 
     auto addr = m_cbUploadBuffer[m_frameIndex].allocate(sizeof(cb), &cb);
     if (addr == 0) return;

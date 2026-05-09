@@ -169,6 +169,7 @@ private:
     world              m_server_world;             // separate ECS world for listen server
     EngineServices     m_server_services{};
     EngineServices     m_client_services{};
+    bool               m_game_module_active = false; // true when Player 1 is running project DLL code
     bool               m_network_pie_active = false; // true when using game DLL for network PIE
     PIEProcessManager  m_pie_processes;
 

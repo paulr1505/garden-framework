@@ -348,6 +348,7 @@ void VulkanRenderAPI::endFrame()
             cfg.height         = swapchain_extent.height;
             cfg.wantSSAO       = wantSSAO;
             cfg.wantShadowMask = wantShadowMask;
+            cfg.renderRml      = true;
             cfg.renderImGui    = true;
 
             if (isDeferredActive())
@@ -486,7 +487,7 @@ void VulkanRenderAPI::endFrame()
                                fxaa_framebuffers[current_image_index],
                                fxaaPass_.getPipeline(),
                                swapchain_extent.width, swapchain_extent.height,
-                               wantSSAO, wantShadowMask, true);
+                               wantSSAO, wantShadowMask, true, true);
             }
         }
     }

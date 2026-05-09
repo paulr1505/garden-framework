@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <optional>
+#include <string>
 
 #include "Application.hpp"
 #include "world.hpp"
@@ -361,7 +362,9 @@ int main(int argc, char* argv[])
             Uint64 frame_start = SDL_GetTicks();
 
             ImGuiManager::get().newFrame();
-            RmlUiManager::get().beginFrame();
+            const std::string api_name = render_api->getAPIName();
+            if (api_name != "D3D12" && api_name != "Vulkan")
+                RmlUiManager::get().beginFrame();
 
             input_handler.process_events();
 

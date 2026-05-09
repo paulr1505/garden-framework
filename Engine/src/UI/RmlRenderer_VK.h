@@ -41,7 +41,7 @@ public:
     void SetTransform(const Rml::Matrix4f* transform) override;
 
 private:
-    bool CreatePipelines();
+    bool CreatePipelines(VkRenderPass renderPass);
     bool CreateDescriptorResources();
 
     std::vector<char> ReadShaderFile(const std::string& path);
@@ -53,9 +53,12 @@ private:
 
     // Pipeline
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
-    VkPipeline m_pipelineTextured = VK_NULL_HANDLE;
-    VkPipeline m_pipelineColor = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_textureSetLayout = VK_NULL_HANDLE;
+    struct PipelineSet {
+        VkPipeline textured = VK_NULL_HANDLE;
+        VkPipeline color = VK_NULL_HANDLE;
+    };
+    std::unordered_map<VkRenderPass, PipelineSet> m_pipelines;
 
     // Descriptor pool for texture bindings
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
@@ -105,4 +108,5 @@ private:
     Rml::Matrix4f m_transform;
 
     VkCommandBuffer m_currentCmdBuffer = VK_NULL_HANDLE;
+    VkRenderPass m_currentRenderPass = VK_NULL_HANDLE;
 };
