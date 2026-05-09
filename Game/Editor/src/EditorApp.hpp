@@ -156,6 +156,7 @@ private:
     // --- Play In Editor (PIE) ---
     std::unique_ptr<GameSimulation> m_game_sim;
     std::shared_ptr<InputManager>   m_game_input_manager;
+    std::unique_ptr<world>          m_play_world; // isolated runtime world for Player 1 PIE
 
     // Snapshot data (saved on Play, restored on Stop)
     LevelData   m_play_snapshot;
@@ -184,6 +185,7 @@ private:
     void resumePlay();
     void ejectFromPlay();
     void returnToPlay();
+    world& chooseRenderWorld();
     camera& chooseRenderCamera();
 
     // LOD hot-reload

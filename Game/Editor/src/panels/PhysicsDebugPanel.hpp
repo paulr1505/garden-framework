@@ -5,7 +5,7 @@
 
 struct PhysicsDebugConfig
 {
-    bool enabled = true;
+    bool enabled = false;
 
     bool show_collider_aabb   = true;
     bool show_player_capsules = true;

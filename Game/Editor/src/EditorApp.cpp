@@ -12,6 +12,7 @@
 #include "Components/PrefabInstanceComponent.hpp"
 #include "Prefab/PrefabManager.hpp"
 #include "Reflection/EngineReflection.hpp"
+#include "Reflection/ReflectionPropertyOps.hpp"
 #include "Reflection/ReflectionSerializer.hpp"
 #include "Assets/LODMeshSerializer.hpp"
 #include "Assets/AssetManager.hpp"
@@ -31,6 +32,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -229,6 +231,253 @@ namespace
 
         editor_config->fps_max_refresh_default_migrated = true;
         editor_config->save();
+    }
+
+    template<typename T>
+    void cloneComponentIfPresent(entt::registry& dst,
+                                 entt::entity dst_entity,
+                                 entt::registry& src,
+                                 entt::entity src_entity)
+    {
+        if (auto* component = src.try_get<T>(src_entity))
+            dst.emplace_or_replace<T>(dst_entity, *component);
+    }
+
+    PhysicsSystem::PhysicsBodyDesc makeClonedBodyDesc(entt::registry& registry,
+                                                       entt::entity entity,
+                                                       const ColliderComponent& collider,
+                                                       bool player_body = false)
+    {
+        PhysicsSystem::PhysicsBodyDesc desc;
+        if (auto* rb = registry.try_get<RigidBodyComponent>(entity))
+        {
+            desc.mass = rb->mass;
+            desc.apply_gravity = player_body ? false : rb->apply_gravity;
+        }
+        else
+        {
+            desc.apply_gravity = !player_body;
+        }
+
+        desc.friction = collider.friction;
+        desc.restitution = collider.restitution;
+        desc.lock_rotation = true;
+        return desc;
+    }
+
+    const char* entityDebugName(entt::registry& registry, entt::entity entity)
+    {
+        if (auto* tag = registry.try_get<TagComponent>(entity))
+            return tag->name.c_str();
+        return "<unnamed>";
+    }
+
+    bool createClonedPhysicsBody(world& game_world, entt::entity entity)
+    {
+        auto& registry = game_world.registry;
+        if (!registry.all_of<ColliderComponent, TransformComponent>(entity))
+            return false;
+        if (registry.all_of<PlayerComponent>(entity))
+            return false;
+
+        auto& collider = registry.get<ColliderComponent>(entity);
+        auto& transform = registry.get<TransformComponent>(entity);
+        PhysicsSystem::PhysicsBodyDesc desc = makeClonedBodyDesc(registry, entity, collider);
+
+        BodyMotionType motion = BodyMotionType::Static;
+        if (auto* rb = registry.try_get<RigidBodyComponent>(entity))
+            motion = rb->motion_type;
+
+        if (motion == BodyMotionType::Kinematic)
+        {
+            if (collider.shape_type == ColliderShapeType::Mesh)
+            {
+                if (!collider.is_mesh_valid())
+                {
+                    LOG_ENGINE_ERROR("PIE clone '{}': kinematic mesh collider has no valid mesh", entityDebugName(registry, entity));
+                    return false;
+                }
+                return !game_world.getPhysicsSystem()
+                    .createStaticMeshBody(transform.position, transform.rotation, transform.scale,
+                                          *collider.get_mesh(), entity, desc)
+                    .IsInvalid();
+            }
+
+            JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(collider, transform.scale);
+            if (!shape)
+            {
+                LOG_ENGINE_ERROR("PIE clone '{}': failed to create kinematic collider shape '{}'",
+                                 entityDebugName(registry, entity), colliderShapeTypeToString(collider.shape_type));
+                return false;
+            }
+            return !game_world.getPhysicsSystem()
+                .createKinematicBody(transform.position, transform.rotation, shape, entity, desc)
+                .IsInvalid();
+        }
+
+        if (motion == BodyMotionType::Dynamic)
+        {
+            if (collider.shape_type == ColliderShapeType::Mesh)
+            {
+                if (!collider.is_mesh_valid())
+                {
+                    LOG_ENGINE_ERROR("PIE clone '{}': dynamic mesh collider has no valid mesh", entityDebugName(registry, entity));
+                    return false;
+                }
+                collider.shape_type = ColliderShapeType::ConvexHull;
+                LOG_ENGINE_WARN("PIE clone '{}': Mesh collider on dynamic body not supported, using ConvexHull",
+                                entityDebugName(registry, entity));
+            }
+
+            JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(collider, transform.scale);
+            if (!shape)
+            {
+                LOG_ENGINE_ERROR("PIE clone '{}': failed to create dynamic collider shape '{}'",
+                                 entityDebugName(registry, entity), colliderShapeTypeToString(collider.shape_type));
+                return false;
+            }
+            return !game_world.getPhysicsSystem()
+                .createDynamicBody(transform.position, transform.rotation, shape, entity, desc)
+                .IsInvalid();
+        }
+
+        if (collider.shape_type == ColliderShapeType::Mesh)
+        {
+            if (!collider.is_mesh_valid())
+            {
+                LOG_ENGINE_ERROR("PIE clone '{}': static mesh collider has no valid mesh", entityDebugName(registry, entity));
+                return false;
+            }
+            return !game_world.getPhysicsSystem()
+                .createStaticMeshBody(transform.position, transform.rotation, transform.scale,
+                                      *collider.get_mesh(), entity, desc)
+                .IsInvalid();
+        }
+
+        JPH::ShapeRefC shape = PhysicsSystem::createShapeFromCollider(collider, transform.scale);
+        if (!shape)
+        {
+            LOG_ENGINE_ERROR("PIE clone '{}': failed to create static collider shape '{}'",
+                             entityDebugName(registry, entity), colliderShapeTypeToString(collider.shape_type));
+            return false;
+        }
+        return !game_world.getPhysicsSystem()
+            .createStaticBody(transform.position, transform.rotation, shape, entity, desc)
+            .IsInvalid();
+    }
+
+    void cloneReflectedComponents(entt::registry& dst,
+                                  entt::entity dst_entity,
+                                  entt::registry& src,
+                                  entt::entity src_entity,
+                                  const ReflectionRegistry& reflection)
+    {
+        for (const ComponentDescriptor& desc : reflection.getAll())
+        {
+            if (!desc.has || !desc.get || !desc.add)
+                continue;
+            if (!desc.has(src, src_entity))
+                continue;
+
+            desc.add(dst, dst_entity);
+            void* src_component = desc.get(src, src_entity);
+            void* dst_component = desc.get(dst, dst_entity);
+            if (src_component && dst_component)
+                ReflectionPropertyOps::copyComponentProperties(desc, src_component, dst_component);
+        }
+    }
+
+    std::unique_ptr<world> cloneEditorWorldForPIE(world& editor_world,
+                                                  const LevelMetadata& metadata,
+                                                  const ReflectionRegistry& reflection)
+    {
+        auto play_world = std::make_unique<world>();
+        play_world->setGravity(metadata.gravity);
+        play_world->setFixedDelta(metadata.fixed_delta);
+        play_world->initializePhysics();
+        play_world->world_camera = editor_world.world_camera;
+
+        std::unordered_map<entt::entity, entt::entity> entity_map;
+        std::unordered_map<std::string, entt::entity> name_map;
+
+        auto view = editor_world.registry.view<TagComponent, TransformComponent>();
+        for (entt::entity src_entity : view)
+        {
+            entt::entity dst_entity = play_world->registry.create();
+            entity_map[src_entity] = dst_entity;
+
+            cloneComponentIfPresent<TagComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+            cloneComponentIfPresent<TransformComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+            cloneComponentIfPresent<MeshComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+            cloneComponentIfPresent<TerrainComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+            cloneComponentIfPresent<RigidBodyComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+            cloneComponentIfPresent<ColliderComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+            cloneComponentIfPresent<CharacterControllerComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+            cloneComponentIfPresent<PlayerComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+            cloneComponentIfPresent<FreecamComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+            cloneComponentIfPresent<PlayerRepresentationComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+            cloneComponentIfPresent<PointLightComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+            cloneComponentIfPresent<SpotLightComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+            cloneComponentIfPresent<ConstraintComponent>(play_world->registry, dst_entity, editor_world.registry, src_entity);
+
+            cloneReflectedComponents(play_world->registry, dst_entity, editor_world.registry, src_entity, reflection);
+
+            if (auto* tag = play_world->registry.try_get<TagComponent>(dst_entity))
+                name_map[tag->name] = dst_entity;
+        }
+
+        for (auto [src_entity, dst_entity] : entity_map)
+        {
+            if (auto* rep = play_world->registry.try_get<PlayerRepresentationComponent>(dst_entity))
+            {
+                if (rep->tracked_player != entt::null)
+                {
+                    auto it = entity_map.find(rep->tracked_player);
+                    rep->tracked_player = (it != entity_map.end()) ? it->second : entt::null;
+                }
+            }
+
+            if (auto* constraint = play_world->registry.try_get<ConstraintComponent>(dst_entity))
+            {
+                constraint->target_entity = entt::null;
+                auto it = name_map.find(constraint->target_entity_name);
+                if (it != name_map.end())
+                    constraint->target_entity = it->second;
+            }
+        }
+
+        for (auto entity : play_world->registry.view<ColliderComponent, TransformComponent>())
+            createClonedPhysicsBody(*play_world, entity);
+
+        for (auto entity : play_world->registry.view<PlayerComponent, TransformComponent>())
+        {
+            auto& player = play_world->registry.get<PlayerComponent>(entity);
+            auto& controller = play_world->registry.get_or_emplace<CharacterControllerComponent>(entity);
+            controller.move_speed = player.speed;
+            controller.jump_velocity = player.jump_force;
+            controller.input_enabled = player.input_enabled;
+            controller.capsule_half_height = player.capsule_half_height;
+            controller.capsule_radius = player.capsule_radius;
+
+            if (!play_world->registry.all_of<RigidBodyComponent>(entity))
+            {
+                auto& rb = play_world->registry.emplace<RigidBodyComponent>(entity);
+                rb.mass = 80.0f;
+                rb.apply_gravity = false;
+            }
+
+            play_world->getPhysicsSystem().createPlayerBody(play_world->registry, entity);
+        }
+
+        for (auto entity : play_world->registry.view<ConstraintComponent>())
+        {
+            auto& constraint = play_world->registry.get<ConstraintComponent>(entity);
+            if (constraint.target_entity != entt::null)
+                play_world->getPhysicsSystem().createConstraint(entity, constraint.target_entity, constraint);
+        }
+
+        play_world->getPhysicsSystem().optimizeBroadPhase();
+        return play_world;
     }
 }
 
@@ -769,7 +1018,8 @@ void EditorApp::run()
                         m_game_module.serverUpdate(m_delta_time);
 
                     m_game_module.update(m_delta_time);
-                    m_renderer.markBVHDirty();
+                    if (m_state.play_mode != PlayMode::Ejected)
+                        m_renderer.markBVHDirty();
 
                     if (m_network_pie_active)
                     {
@@ -793,7 +1043,8 @@ void EditorApp::run()
                     }
 
                     m_game_sim->update(m_delta_time);
-                    m_renderer.markBVHDirty();
+                    if (m_state.play_mode != PlayMode::Ejected)
+                        m_renderer.markBVHDirty();
                 }
             }
         }
@@ -810,8 +1061,8 @@ void EditorApp::run()
         // Update debug draw (tick persistent lines)
         DebugDraw::get().update(m_delta_time);
 
-        // Draw grid if enabled (only in editing mode)
-        if (m_state.show_grid && !m_state.isSimulationActive())
+        // Draw grid over the editor scene, including ejected Scene View.
+        if (m_state.show_grid && (!m_state.isSimulationActive() || m_state.play_mode == PlayMode::Ejected))
             renderGrid();
 
         // NavMesh debug visualization (submit lines before scene render)
@@ -820,7 +1071,8 @@ void EditorApp::run()
         // Physics debug visualization
         m_physics_debug_panel.drawDebugVisualization();
 
-        // --- Choose which camera to render with ---
+        // --- Choose which world/camera to render with ---
+        world& render_world = chooseRenderWorld();
         camera& render_camera = chooseRenderCamera();
 
         // --- Phase 1: Render 3D scene to viewport texture ---
@@ -829,11 +1081,12 @@ void EditorApp::run()
         render_api->setViewportSize(m_viewport.width, m_viewport.height);
         const bool render_main_viewport =
             m_show_viewport && m_viewport.is_visible && m_viewport.width > 0 && m_viewport.height > 0;
-        render_api->setSceneRmlEnabled(m_state.isSimulationActive());
+        render_api->setSceneRmlEnabled(m_state.play_mode == PlayMode::Playing ||
+                                       m_state.play_mode == PlayMode::Paused);
         {
             EditorPerformanceMonitor::ScopedTimer timer(m_perf_monitor, EditorPerfSeries::CpuViewport);
             if (render_main_viewport)
-                m_renderer.render_scene_to_texture(m_world.registry, render_camera);
+                m_renderer.render_scene_to_texture(render_world.registry, render_camera);
         }
 
         // --- Phase 1b: Render additional PIE client viewports ---
@@ -1250,6 +1503,13 @@ void EditorApp::beginPlay()
         m_pre_play_selected_name = m_world.registry.get<TagComponent>(m_hierarchy.selected_entity).name;
     }
 
+    m_play_world = cloneEditorWorldForPIE(m_world, m_play_snapshot.metadata, m_reflection);
+    if (!m_play_world)
+    {
+        LOG_ENGINE_ERROR("PIE: Failed to create isolated play world");
+        return;
+    }
+
     // Determine if we should use the game DLL for network PIE
     bool use_network_pie = (m_state.network_pie.net_mode != PIENetMode::Standalone);
     std::string dll_path = m_project_manager.getAbsoluteModulePath();
@@ -1323,7 +1583,7 @@ void EditorApp::beginPlay()
 
                 // Set up client EngineServices
                 m_client_services = {};
-                m_client_services.game_world      = &m_world;
+                m_client_services.game_world      = m_play_world.get();
                 m_client_services.render_api       = m_app.getRenderAPI();
                 m_client_services.input_manager    = m_game_input_manager.get();
                 m_client_services.reflection       = &m_reflection;
@@ -1463,7 +1723,7 @@ void EditorApp::beginPlay()
 
             // Set up client EngineServices
             m_client_services = {};
-            m_client_services.game_world      = &m_world;
+            m_client_services.game_world      = m_play_world.get();
             m_client_services.render_api       = m_app.getRenderAPI();
             m_client_services.input_manager    = m_game_input_manager.get();
             m_client_services.reflection       = &m_reflection;
@@ -1568,7 +1828,7 @@ void EditorApp::beginPlay()
         if (!dll_path.empty() && std::filesystem::exists(dll_path) && m_game_module.load(dll_path))
         {
             m_client_services = {};
-            m_client_services.game_world      = &m_world;
+            m_client_services.game_world      = m_play_world.get();
             m_client_services.render_api       = m_app.getRenderAPI();
             m_client_services.input_manager    = m_game_input_manager.get();
             m_client_services.reflection       = &m_reflection;
@@ -1593,7 +1853,7 @@ void EditorApp::beginPlay()
         if (!m_game_module_active)
         {
             // No project DLL is available; fall back to the engine-only simulation.
-            m_game_sim = std::make_unique<GameSimulation>(&m_world, m_game_input_manager);
+            m_game_sim = std::make_unique<GameSimulation>(m_play_world.get(), m_game_input_manager);
             m_game_sim->initialize();
         }
     }
@@ -1668,41 +1928,14 @@ void EditorApp::stopPlay()
         m_game_input_manager.reset();
     }
 
-    // 2. Reset world (shutdown physics, clear registry, reinitialize)
-    m_world.resetWorld();
-    m_level_manager.cleanup();
-    m_inspector.mesh_path_cache.clear();
-    m_hierarchy.selected_entity = entt::null;
+    // 2. Drop the isolated runtime world. The editor scene stayed resident,
+    // so returning to Scene View does not need a full level reload.
+    m_play_world.reset();
 
-    // 3. Restore from snapshot
-    m_level_data = m_play_snapshot;
-    m_level_settings.metadata = &m_level_data.metadata;
-
-    m_level_manager.instantiateLevelParallel(
-        m_play_snapshot, m_world, m_app.getRenderAPI(),
-        nullptr, nullptr, nullptr);
-
-    // 4. Rebuild caches
-    buildMeshPathCache();
-
-    // 5. Restore editor camera
+    // 3. Restore editor camera
     m_editor_cam.cam = m_pre_play_editor_cam;
 
-    // 6. Restore selection by name (best-effort)
-    if (!m_pre_play_selected_name.empty())
-    {
-        auto tag_view = m_world.registry.view<TagComponent>();
-        for (auto entity : tag_view)
-        {
-            if (tag_view.get<TagComponent>(entity).name == m_pre_play_selected_name)
-            {
-                m_hierarchy.selected_entity = entity;
-                break;
-            }
-        }
-    }
-
-    // 7. Restore state
+    // 4. Restore state
     m_state.play_mode = PlayMode::Editing;
     m_mouse_captured_for_game = false;
     SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
@@ -1759,11 +1992,12 @@ void EditorApp::ejectFromPlay()
     SDL_SetWindowRelativeMouseMode(m_app.getWindow(), false);
 
     // Sync editor camera to current game camera so user starts flying from there
-    if (m_game_module_active)
-        m_editor_cam.cam = m_world.world_camera;
+    if (m_play_world)
+        m_editor_cam.cam = m_play_world->world_camera;
     else if (m_game_sim)
         m_editor_cam.cam = m_game_sim->getActiveCamera();
 
+    m_renderer.markBVHDirty();
     LOG_ENGINE_INFO("PIE: Ejected (editor camera, simulation continues)");
 }
 
@@ -1775,7 +2009,25 @@ void EditorApp::returnToPlay()
     m_state.play_mode = PlayMode::Playing;
     // Don't auto-capture mouse, user clicks viewport to recapture
 
+    m_renderer.markBVHDirty();
     LOG_ENGINE_INFO("PIE: Returned to play");
+}
+
+world& EditorApp::chooseRenderWorld()
+{
+    switch (m_state.play_mode)
+    {
+    case PlayMode::Playing:
+    case PlayMode::Paused:
+        if (m_play_world)
+            return *m_play_world;
+        return m_world;
+
+    case PlayMode::Ejected:
+    case PlayMode::Editing:
+    default:
+        return m_world;
+    }
 }
 
 camera& EditorApp::chooseRenderCamera()
@@ -1784,8 +2036,8 @@ camera& EditorApp::chooseRenderCamera()
     {
     case PlayMode::Playing:
     case PlayMode::Paused:
-        if (m_game_module_active)
-            return m_world.world_camera; // game DLL updates world_camera
+        if (m_play_world)
+            return m_play_world->world_camera;
         if (m_game_sim)
             return m_game_sim->getActiveCamera();
         return m_editor_cam.cam;
@@ -2316,7 +2568,6 @@ void EditorApp::renderMenuBar()
             ImGui::MenuItem("Asset Preview",   nullptr, &m_show_model_preview);
             ImGui::MenuItem("Status Bar",      nullptr, &m_show_status_bar);
             ImGui::MenuItem("NavMesh",         nullptr, &m_show_navmesh_panel);
-            ImGui::MenuItem("Physics Debug",   nullptr, &m_show_physics_debug);
             ImGui::MenuItem("Grid",            nullptr, &m_state.show_grid);
 
             // Plugin-contributed panels (grouped under a sub-header when present).
@@ -2341,6 +2592,7 @@ void EditorApp::renderMenuBar()
 
         if (ImGui::BeginMenu("Debug"))
         {
+            ImGui::MenuItem("Physics Debug",       nullptr, &m_show_physics_debug);
             ImGui::MenuItem("Performance Monitor", nullptr, &m_show_performance_monitor);
             ImGui::EndMenu();
         }
