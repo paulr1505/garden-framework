@@ -88,6 +88,11 @@ public:
                                                 const std::vector<const uint8_t*>& mip_data,
                                                 const std::vector<size_t>& mip_sizes,
                                                 const std::vector<std::pair<int,int>>& mip_dimensions) override;
+    virtual TextureHandle loadCompressedTextureMipRange(int width, int height, uint32_t format,
+                                                        int total_mip_count, int first_mip,
+                                                        const std::vector<const uint8_t*>& mip_data,
+                                                        const std::vector<size_t>& mip_sizes,
+                                                        const std::vector<std::pair<int,int>>& mip_dimensions) override;
     virtual void bindTexture(TextureHandle texture) override;
     virtual void unbindTexture() override;
     virtual void deleteTexture(TextureHandle texture) override;

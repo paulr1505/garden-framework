@@ -153,6 +153,20 @@ public:
                                                 const std::vector<size_t>& mip_sizes,
                                                 const std::vector<std::pair<int,int>>& mip_dimensions)
     { (void)width; (void)height; (void)format; (void)mip_count; (void)mip_data; (void)mip_sizes; (void)mip_dimensions; return INVALID_TEXTURE; }
+    virtual TextureHandle loadCompressedTextureMipRange(int width, int height, uint32_t format,
+                                                        int total_mip_count, int first_mip,
+                                                        const std::vector<const uint8_t*>& mip_data,
+                                                        const std::vector<size_t>& mip_sizes,
+                                                        const std::vector<std::pair<int,int>>& mip_dimensions)
+    {
+        if (mip_data.empty() || mip_sizes.empty() || mip_dimensions.empty())
+            return INVALID_TEXTURE;
+        const int resident_mips = static_cast<int>(mip_data.size());
+        if (first_mip <= 0 && resident_mips == total_mip_count)
+            return loadCompressedTexture(width, height, format, total_mip_count, mip_data, mip_sizes, mip_dimensions);
+        return loadCompressedTexture(mip_dimensions[0].first, mip_dimensions[0].second, format,
+                                     resident_mips, mip_data, mip_sizes, mip_dimensions);
+    }
     virtual void bindTexture(TextureHandle texture) = 0;
     virtual void unbindTexture() = 0;
     virtual void deleteTexture(TextureHandle texture) = 0;

@@ -45,7 +45,8 @@ inline VkImageView createImageView(VkDevice device, VkImage image, VkFormat form
                                     VkImageAspectFlags aspectMask,
                                     uint32_t mipLevels = 1, uint32_t baseArrayLayer = 0,
                                     uint32_t layerCount = 1,
-                                    VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D)
+                                    VkImageViewType viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                    uint32_t baseMipLevel = 0)
 {
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -53,7 +54,7 @@ inline VkImageView createImageView(VkDevice device, VkImage image, VkFormat form
     viewInfo.viewType = viewType;
     viewInfo.format = format;
     viewInfo.subresourceRange.aspectMask = aspectMask;
-    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.baseMipLevel = baseMipLevel;
     viewInfo.subresourceRange.levelCount = mipLevels;
     viewInfo.subresourceRange.baseArrayLayer = baseArrayLayer;
     viewInfo.subresourceRange.layerCount = layerCount;

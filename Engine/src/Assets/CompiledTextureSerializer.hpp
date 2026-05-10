@@ -9,6 +9,7 @@ namespace Assets {
 
 struct CompiledTextureData {
     CtexHeader header{};
+    uint32_t first_mip = 0;
 
     struct MipLevel {
         uint32_t width  = 0;
@@ -22,6 +23,8 @@ class ENGINE_API CompiledTextureSerializer {
 public:
     static bool save(const CompiledTextureData& data, const std::string& filepath);
     static bool load(CompiledTextureData& data, const std::string& filepath);
+    static bool loadMipRange(CompiledTextureData& data, const std::string& filepath,
+                             uint32_t first_mip, uint32_t mip_count);
     static bool loadHeader(CtexHeader& header, const std::string& filepath);
 };
 

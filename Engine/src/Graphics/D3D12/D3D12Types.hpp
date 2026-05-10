@@ -78,6 +78,9 @@ struct D3D12Texture
     UINT srvIndex = UINT(-1); // Index into shader-visible SRV heap
     uint32_t width = 0;
     uint32_t height = 0;
+    uint32_t mipLevels = 1;
+    uint32_t firstResidentMip = 0;
+    uint32_t residentMipLevels = 1;
 };
 
 // Constant buffer structures (must match shader layout, 16-byte aligned)

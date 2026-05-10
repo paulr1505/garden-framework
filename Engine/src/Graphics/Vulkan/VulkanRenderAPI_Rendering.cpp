@@ -261,6 +261,8 @@ TextureHandle VulkanRenderAPI::loadTextureFromMemory(const uint8_t* pixels, int 
     texture.height = height;
     texture.mipLevels = generate_mipmaps ?
         static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1 : 1;
+    texture.firstResidentMip = 0;
+    texture.residentMipLevels = texture.mipLevels;
 
     VkDeviceSize imageSize = width * height * 4;
 
@@ -363,7 +365,22 @@ TextureHandle VulkanRenderAPI::loadCompressedTexture(int width, int height, uint
                                                       const std::vector<size_t>& mip_sizes,
                                                       const std::vector<std::pair<int,int>>& mip_dimensions)
 {
-    if (mip_count <= 0 || mip_data.empty()) return INVALID_TEXTURE;
+    return loadCompressedTextureMipRange(width, height, format, mip_count, 0,
+                                         mip_data, mip_sizes, mip_dimensions);
+}
+
+TextureHandle VulkanRenderAPI::loadCompressedTextureMipRange(int width, int height, uint32_t format,
+                                                              int total_mip_count, int first_mip,
+                                                              const std::vector<const uint8_t*>& mip_data,
+                                                              const std::vector<size_t>& mip_sizes,
+                                                              const std::vector<std::pair<int,int>>& mip_dimensions)
+{
+    const int resident_mip_count = static_cast<int>(mip_data.size());
+    if (width <= 0 || height <= 0 || total_mip_count <= 0 || first_mip < 0 ||
+        resident_mip_count <= 0 || mip_sizes.size() < mip_data.size() ||
+        mip_dimensions.size() < mip_data.size() ||
+        first_mip + resident_mip_count > total_mip_count)
+        return INVALID_TEXTURE;
 
     // Map format enum to VkFormat
     VkFormat vkFormat;
@@ -379,7 +396,9 @@ TextureHandle VulkanRenderAPI::loadCompressedTexture(int width, int height, uint
     VulkanTexture texture;
     texture.width = width;
     texture.height = height;
-    texture.mipLevels = static_cast<uint32_t>(mip_count);
+    texture.mipLevels = static_cast<uint32_t>(total_mip_count);
+    texture.firstResidentMip = static_cast<uint32_t>(first_mip);
+    texture.residentMipLevels = static_cast<uint32_t>(resident_mip_count);
 
     // Create image
     VkResult imgResult = vkutil::createImage(vma_allocator, width, height, vkFormat,
@@ -397,7 +416,7 @@ TextureHandle VulkanRenderAPI::loadCompressedTexture(int width, int height, uint
         transitionImageLayout(texture.image, vkFormat,
                              VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
 
-        for (int i = 0; i < mip_count; ++i) {
+        for (int i = 0; i < resident_mip_count; ++i) {
             VkDeviceSize mipSize = static_cast<VkDeviceSize>(mip_sizes[i]);
             ensureStagingBuffer(mipSize);
             memcpy(staging_mapped, mip_data[i], mipSize);
@@ -409,7 +428,7 @@ TextureHandle VulkanRenderAPI::loadCompressedTexture(int width, int height, uint
             region.bufferRowLength = 0;
             region.bufferImageHeight = 0;
             region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.mipLevel = static_cast<uint32_t>(i);
+            region.imageSubresource.mipLevel = static_cast<uint32_t>(first_mip + i);
             region.imageSubresource.baseArrayLayer = 0;
             region.imageSubresource.layerCount = 1;
             region.imageOffset = {0, 0, 0};
@@ -432,7 +451,10 @@ TextureHandle VulkanRenderAPI::loadCompressedTexture(int width, int height, uint
 
     // Create image view
     texture.imageView = vkutil::createImageView(device, texture.image, vkFormat,
-                                                 VK_IMAGE_ASPECT_COLOR_BIT, texture.mipLevels);
+                                                 VK_IMAGE_ASPECT_COLOR_BIT,
+                                                 texture.residentMipLevels, 0, 1,
+                                                 VK_IMAGE_VIEW_TYPE_2D,
+                                                 texture.firstResidentMip);
     if (texture.imageView == VK_NULL_HANDLE) {
         LOG_ENGINE_ERROR("[Vulkan] loadCompressedTexture: vkCreateImageView failed");
         vmaDestroyImage(vma_allocator, texture.image, texture.allocation);
@@ -452,7 +474,7 @@ TextureHandle VulkanRenderAPI::loadCompressedTexture(int width, int height, uint
     texSamplerKey.compareEnable = VK_FALSE;
     texSamplerKey.compareOp = VK_COMPARE_OP_ALWAYS;
     texSamplerKey.minLod = 0.0f;
-    texSamplerKey.maxLod = static_cast<float>(texture.mipLevels);
+    texSamplerKey.maxLod = static_cast<float>(texture.residentMipLevels);
     texSamplerKey.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
     texture.sampler = sampler_cache.getOrCreate(texSamplerKey);
 
@@ -463,8 +485,9 @@ TextureHandle VulkanRenderAPI::loadCompressedTexture(int width, int height, uint
         textures[handle] = texture;
     }
 
-    LOG_ENGINE_TRACE("[Vulkan] loadCompressedTexture: handle {} ({}x{}, {} mips, format {})",
-                     handle, width, height, mip_count, format);
+    LOG_ENGINE_TRACE("[Vulkan] loadCompressedTexture: handle {} ({}x{}, mips {}..{} of {}, format {})",
+                     handle, width, height, first_mip, first_mip + resident_mip_count - 1,
+                     total_mip_count, format);
     return handle;
 }
 

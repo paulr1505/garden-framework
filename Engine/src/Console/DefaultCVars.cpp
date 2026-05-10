@@ -67,6 +67,20 @@ CONVAR_BOUNDED(r_staticmesh_chunk_tris, 8192, 128, 65536, ConVarFlags::ARCHIVE |
 CONVAR_BOUNDED(r_staticmesh_max_chunks, 3072, 0, 65536, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
                "Maximum chunks per static mesh, 0 means unlimited");
 
+CONVAR(r_texture_streaming, 1, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+       "Enable compiled texture mip streaming for .ctex assets");
+
+CONVAR_BOUNDED(r_texture_streaming_max_dimension, 2048, 0, 16384,
+               ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+               "Largest resident texture dimension for streamed .ctex assets, 0 means full resolution");
+
+CONVAR_BOUNDED(r_texture_streaming_min_resident_mips, 4, 1, 16,
+               ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
+               "Minimum number of mip levels kept resident for streamed .ctex assets");
+
+CONVAR(r_texture_streaming_debug, 0, ConVarFlags::CLIENT_ONLY,
+       "Print compiled texture streaming decisions");
+
 CONVAR(r_deferred, 0, ConVarFlags::ARCHIVE | ConVarFlags::CLIENT_ONLY,
        "Enable deferred rendering (opaque GBuffer + deferred lighting; transparents still forward). "
        "Supported on D3D12 and Vulkan.");

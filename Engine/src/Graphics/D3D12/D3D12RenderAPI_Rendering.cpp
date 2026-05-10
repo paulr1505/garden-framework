@@ -334,6 +334,9 @@ TextureHandle D3D12RenderAPI::loadTextureFromMemory(const uint8_t* pixels, int w
 
     tex.width = width;
     tex.height = height;
+    tex.mipLevels = static_cast<uint32_t>(mipLevels);
+    tex.firstResidentMip = 0;
+    tex.residentMipLevels = static_cast<uint32_t>(mipLevels);
 
     TextureHandle handle = INVALID_TEXTURE;
     UINT srvIdx = tex.srvIndex;
@@ -352,7 +355,22 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
                                                      const std::vector<size_t>& mip_sizes,
                                                      const std::vector<std::pair<int,int>>& mip_dimensions)
 {
-    if (mip_count <= 0 || mip_data.empty()) return INVALID_TEXTURE;
+    return loadCompressedTextureMipRange(width, height, format, mip_count, 0,
+                                         mip_data, mip_sizes, mip_dimensions);
+}
+
+TextureHandle D3D12RenderAPI::loadCompressedTextureMipRange(int width, int height, uint32_t format,
+                                                             int total_mip_count, int first_mip,
+                                                             const std::vector<const uint8_t*>& mip_data,
+                                                             const std::vector<size_t>& mip_sizes,
+                                                             const std::vector<std::pair<int,int>>& mip_dimensions)
+{
+    const int resident_mip_count = static_cast<int>(mip_data.size());
+    if (width <= 0 || height <= 0 || total_mip_count <= 0 || first_mip < 0 ||
+        resident_mip_count <= 0 || mip_sizes.size() < mip_data.size() ||
+        mip_dimensions.size() < mip_data.size() ||
+        first_mip + resident_mip_count > total_mip_count)
+        return INVALID_TEXTURE;
 
     DXGI_FORMAT dxgiFormat;
     UINT blockSize = 0;
@@ -374,7 +392,7 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
     texDesc.Width = width;
     texDesc.Height = height;
     texDesc.DepthOrArraySize = 1;
-    texDesc.MipLevels = static_cast<UINT16>(mip_count);
+    texDesc.MipLevels = static_cast<UINT16>(total_mip_count);
     texDesc.Format = dxgiFormat;
     texDesc.SampleDesc.Count = 1;
 
@@ -387,7 +405,7 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
 
     // Calculate total upload buffer size
     size_t totalUploadSize = 0;
-    for (int i = 0; i < mip_count; i++) {
+    for (int i = 0; i < resident_mip_count; i++) {
         UINT64 rowPitch;
         if (isBC) {
             UINT blockWidth = (mip_dimensions[i].first + 3) / 4;
@@ -409,7 +427,7 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
 
     D3D12_RESOURCE_DESC uploadDesc = {};
     uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    uploadDesc.Width = totalUploadSize + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT * mip_count;
+    uploadDesc.Width = totalUploadSize + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT * resident_mip_count;
     uploadDesc.Height = 1;
     uploadDesc.DepthOrArraySize = 1;
     uploadDesc.MipLevels = 1;
@@ -429,7 +447,7 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
     auto* copyCmdList = m_copyQueue.getCommandList();
 
     size_t uploadOffset = 0;
-    for (int i = 0; i < mip_count; i++) {
+    for (int i = 0; i < resident_mip_count; i++) {
         uploadOffset = AlignUp(uploadOffset, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
 
         int mw = mip_dimensions[i].first;
@@ -462,7 +480,7 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
         D3D12_TEXTURE_COPY_LOCATION dst = {};
         dst.pResource = tex.resource.Get();
         dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        dst.SubresourceIndex = i;
+        dst.SubresourceIndex = static_cast<UINT>(first_mip + i);
 
         D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
         srcLoc.pResource = uploadBuffer.Get();
@@ -490,20 +508,24 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
     tex.srvIndex = m_srvAllocator.allocate();
     if (tex.srvIndex == UINT(-1))
     {
-        LOG_ENGINE_ERROR("[D3D12] Failed to allocate SRV for compressed texture ({}x{}, {} mips, format {})",
-                          width, height, mip_count, format);
+        LOG_ENGINE_ERROR("[D3D12] Failed to allocate SRV for compressed texture ({}x{}, resident mips {}..{}, format {})",
+                          width, height, first_mip, first_mip + resident_mip_count - 1, format);
         return INVALID_TEXTURE;
     }
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.Format = dxgiFormat;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc.Texture2D.MipLevels = mip_count;
+    srvDesc.Texture2D.MostDetailedMip = static_cast<UINT>(first_mip);
+    srvDesc.Texture2D.MipLevels = static_cast<UINT>(resident_mip_count);
     device->CreateShaderResourceView(tex.resource.Get(), &srvDesc,
                                       m_srvAllocator.getCPU(tex.srvIndex));
 
     tex.width = width;
     tex.height = height;
+    tex.mipLevels = static_cast<uint32_t>(total_mip_count);
+    tex.firstResidentMip = static_cast<uint32_t>(first_mip);
+    tex.residentMipLevels = static_cast<uint32_t>(resident_mip_count);
 
     TextureHandle handle = INVALID_TEXTURE;
     {
@@ -511,8 +533,9 @@ TextureHandle D3D12RenderAPI::loadCompressedTexture(int width, int height, uint3
         handle = nextTextureHandle++;
         textures[handle] = std::move(tex);
     }
-    LOG_ENGINE_TRACE("[D3D12] loadCompressedTexture: handle {} ({}x{}, {} mips, format {})",
-                      handle, width, height, mip_count, format);
+    LOG_ENGINE_TRACE("[D3D12] loadCompressedTexture: handle {} ({}x{}, mips {}..{} of {}, format {})",
+                      handle, width, height, first_mip, first_mip + resident_mip_count - 1,
+                      total_mip_count, format);
     return handle;
 }
 

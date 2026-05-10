@@ -87,6 +87,72 @@ static Assets::MeshChunkConfig getStaticMeshChunkConfig()
     return cfg;
 }
 
+static uint32_t getTextureStreamingFirstMip(const Assets::CtexHeader& header)
+{
+    if (header.mip_count <= 1)
+        return 0;
+
+    auto* streaming_cvar = CVAR_PTR(r_texture_streaming);
+    if (!streaming_cvar || !streaming_cvar->getBool())
+        return 0;
+
+    const int max_dimension = CVAR_PTR(r_texture_streaming_max_dimension)
+        ? CVAR_PTR(r_texture_streaming_max_dimension)->getInt()
+        : 0;
+    if (max_dimension <= 0)
+        return 0;
+
+    uint32_t first_mip = 0;
+    uint32_t largest_dimension = std::max(header.width, header.height);
+    while (first_mip + 1 < header.mip_count &&
+           largest_dimension > static_cast<uint32_t>(max_dimension))
+    {
+        ++first_mip;
+        largest_dimension = std::max(1u, largest_dimension / 2u);
+    }
+
+    int min_resident = CVAR_PTR(r_texture_streaming_min_resident_mips)
+        ? CVAR_PTR(r_texture_streaming_min_resident_mips)->getInt()
+        : 1;
+    min_resident = std::max(min_resident, 1);
+    if (header.mip_count - first_mip < static_cast<uint32_t>(min_resident))
+    {
+        first_mip = header.mip_count > static_cast<uint32_t>(min_resident)
+            ? header.mip_count - static_cast<uint32_t>(min_resident)
+            : 0;
+    }
+
+    return first_mip;
+}
+
+static bool loadCompiledTextureDataForStreaming(Assets::CompiledTextureData& out,
+                                                const std::string& ctex_path)
+{
+    Assets::CtexHeader header{};
+    if (!Assets::CompiledTextureSerializer::loadHeader(header, ctex_path))
+        return false;
+
+    const uint32_t first_mip = getTextureStreamingFirstMip(header);
+    const uint32_t resident_mips = header.mip_count - first_mip;
+
+    bool ok = first_mip == 0
+        ? Assets::CompiledTextureSerializer::load(out, ctex_path)
+        : Assets::CompiledTextureSerializer::loadMipRange(out, ctex_path, first_mip, resident_mips);
+
+    if (ok && CVAR_PTR(r_texture_streaming_debug) && CVAR_PTR(r_texture_streaming_debug)->getBool())
+    {
+        LOG_ENGINE_INFO("[TextureStreaming] {}: resident mips {}..{} of {} ({}x{})",
+                        ctex_path,
+                        out.first_mip,
+                        out.first_mip + static_cast<uint32_t>(out.mip_levels.size()) - 1,
+                        out.header.mip_count,
+                        out.header.width,
+                        out.header.height);
+    }
+
+    return ok;
+}
+
 static void copyMaterialPayload(MaterialRange& dst, const MaterialRange& src)
 {
     dst.texture = src.texture;
@@ -2056,11 +2122,10 @@ std::shared_ptr<mesh> LevelManager::loadMesh(const LevelEntity& entity, IRenderA
     return m_ptr;
 }
 
-// Helper: load a .ctex compiled texture via the render API
-static TextureHandle loadCompiledTexture(IRenderAPI* render_api, const std::string& ctex_path)
+static TextureHandle uploadCompiledTextureData(IRenderAPI* render_api,
+                                               const Assets::CompiledTextureData& tex_data)
 {
-    Assets::CompiledTextureData tex_data;
-    if (!Assets::CompiledTextureSerializer::load(tex_data, ctex_path))
+    if (!render_api || tex_data.mip_levels.empty())
         return INVALID_TEXTURE;
 
     std::vector<const uint8_t*> mip_ptrs;
@@ -2073,12 +2138,23 @@ static TextureHandle loadCompiledTexture(IRenderAPI* render_api, const std::stri
         mip_dims.push_back({static_cast<int>(mip.width), static_cast<int>(mip.height)});
     }
 
-    return render_api->loadCompressedTexture(
+    return render_api->loadCompressedTextureMipRange(
         static_cast<int>(tex_data.header.width),
         static_cast<int>(tex_data.header.height),
         static_cast<uint32_t>(tex_data.header.format),
         static_cast<int>(tex_data.header.mip_count),
+        static_cast<int>(tex_data.first_mip),
         mip_ptrs, mip_sizes, mip_dims);
+}
+
+// Helper: load a .ctex compiled texture via the render API
+static TextureHandle loadCompiledTexture(IRenderAPI* render_api, const std::string& ctex_path)
+{
+    Assets::CompiledTextureData tex_data;
+    if (!loadCompiledTextureDataForStreaming(tex_data, ctex_path))
+        return INVALID_TEXTURE;
+
+    return uploadCompiledTextureData(render_api, tex_data);
 }
 
 // Helper: load texture with .ctex fallback
@@ -2339,7 +2415,7 @@ void LevelManager::preloadMeshCPU(MeshPreloadData& data)
                         {
                             MeshPreloadData::PreloadedTexture pt;
                             pt.is_compiled = true;
-                            pt.success = Assets::CompiledTextureSerializer::load(pt.compiled_tex, ctex_path);
+                            pt.success = loadCompiledTextureDataForStreaming(pt.compiled_tex, ctex_path);
                             data.preloaded_textures[ctex_path] = std::move(pt);
                         }
                     }
@@ -2434,22 +2510,7 @@ void LevelManager::preloadMeshCPU(MeshPreloadData& data)
 static TextureHandle uploadPreloadedCompiledTexture(IRenderAPI* render_api,
                                                      const Assets::CompiledTextureData& tex_data)
 {
-    std::vector<const uint8_t*> mip_ptrs;
-    std::vector<size_t> mip_sizes;
-    std::vector<std::pair<int,int>> mip_dims;
-
-    for (const auto& mip : tex_data.mip_levels) {
-        mip_ptrs.push_back(mip.data.data());
-        mip_sizes.push_back(mip.data.size());
-        mip_dims.push_back({static_cast<int>(mip.width), static_cast<int>(mip.height)});
-    }
-
-    return render_api->loadCompressedTexture(
-        static_cast<int>(tex_data.header.width),
-        static_cast<int>(tex_data.header.height),
-        static_cast<uint32_t>(tex_data.header.format),
-        static_cast<int>(tex_data.header.mip_count),
-        mip_ptrs, mip_sizes, mip_dims);
+    return uploadCompiledTextureData(render_api, tex_data);
 }
 
 std::shared_ptr<mesh> LevelManager::finalizeCompiledMeshGPU(

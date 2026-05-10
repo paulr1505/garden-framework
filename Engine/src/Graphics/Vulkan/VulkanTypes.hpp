@@ -74,6 +74,8 @@ struct VulkanTexture {
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t mipLevels = 1;
+    uint32_t firstResidentMip = 0;
+    uint32_t residentMipLevels = 1;
 
     bool isValid() const { return image != VK_NULL_HANDLE; }
 };

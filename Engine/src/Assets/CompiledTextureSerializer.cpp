@@ -50,6 +50,7 @@ bool CompiledTextureSerializer::load(CompiledTextureData& data, const std::strin
 {
     std::ifstream file(filepath, std::ios::binary);
     if (!file.is_open()) return false;
+    data = {};
 
     // --- Header ---
     file.read(reinterpret_cast<char*>(&data.header), sizeof(CtexHeader));
@@ -68,6 +69,7 @@ bool CompiledTextureSerializer::load(CompiledTextureData& data, const std::strin
               data.header.mip_count * sizeof(CtexMipEntry));
 
     // --- Mip data ---
+    data.first_mip = 0;
     data.mip_levels.resize(data.header.mip_count);
     for (uint32_t i = 0; i < data.header.mip_count; ++i) {
         auto& mip = data.mip_levels[i];
@@ -83,6 +85,65 @@ bool CompiledTextureSerializer::load(CompiledTextureData& data, const std::strin
         printf("CompiledTextureSerializer: Read error in %s\n", filepath.c_str());
         return false;
     }
+    return true;
+}
+
+bool CompiledTextureSerializer::loadMipRange(CompiledTextureData& data, const std::string& filepath,
+                                             uint32_t first_mip, uint32_t mip_count)
+{
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file.is_open()) return false;
+    data = {};
+
+    file.read(reinterpret_cast<char*>(&data.header), sizeof(CtexHeader));
+    if (data.header.magic != CTEX_MAGIC) {
+        printf("CompiledTextureSerializer: Invalid magic in %s\n", filepath.c_str());
+        return false;
+    }
+    if (data.header.version != CTEX_VERSION) {
+        printf("CompiledTextureSerializer: Unsupported version %u in %s\n", data.header.version, filepath.c_str());
+        return false;
+    }
+    if (data.header.mip_count == 0) {
+        printf("CompiledTextureSerializer: Texture has no mip levels in %s\n", filepath.c_str());
+        return false;
+    }
+
+    std::vector<CtexMipEntry> entries(data.header.mip_count);
+    file.read(reinterpret_cast<char*>(entries.data()),
+              data.header.mip_count * sizeof(CtexMipEntry));
+    if (!file) {
+        printf("CompiledTextureSerializer: Read error in mip table for %s\n", filepath.c_str());
+        return false;
+    }
+
+    if (first_mip >= data.header.mip_count)
+        first_mip = data.header.mip_count - 1;
+
+    const uint32_t available = data.header.mip_count - first_mip;
+    if (mip_count == 0 || mip_count > available)
+        mip_count = available;
+    if (mip_count == 0)
+        return false;
+
+    data.first_mip = first_mip;
+    data.mip_levels.resize(mip_count);
+
+    for (uint32_t i = 0; i < mip_count; ++i) {
+        auto& mip = data.mip_levels[i];
+        const auto& e = entries[first_mip + i];
+        mip.width  = e.width;
+        mip.height = e.height;
+        mip.data.resize(static_cast<size_t>(e.data_size));
+        file.seekg(e.data_offset);
+        file.read(reinterpret_cast<char*>(mip.data.data()), e.data_size);
+        if (!file) {
+            printf("CompiledTextureSerializer: Read error for mip %u in %s\n",
+                   first_mip + i, filepath.c_str());
+            return false;
+        }
+    }
+
     return true;
 }
 
