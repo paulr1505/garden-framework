@@ -478,15 +478,16 @@ void RmlRenderer_VK::RenderGeometry(Rml::CompiledGeometryHandle handle, Rml::Vec
     // Build UBO data
     RmlUBO ubo = {};
 
-    // Orthographic projection (top-left origin, Vulkan clip space)
-    // Stored in row-major order for Slang RowMajor SPIR-V (transposed from column-major)
+    // Orthographic projection (top-left origin, Vulkan clip space).
+    // The shader is compiled with slangc's command-line default column-major
+    // layout, matching the D3D12 Rml backend's CPU matrix convention.
     float L = 0.0f, R = (float)m_viewportWidth;
     float T = 0.0f, B = (float)m_viewportHeight;
     float ortho[16] = {
-        2.0f / (R - L),    0.0f,              0.0f, (L + R) / (L - R),
-        0.0f,              2.0f / (B - T),    0.0f, (T + B) / (T - B),
+        2.0f / (R - L),    0.0f,              0.0f, 0.0f,
+        0.0f,              2.0f / (B - T),    0.0f, 0.0f,
         0.0f,              0.0f,              1.0f, 0.0f,
-        0.0f,              0.0f,              0.0f, 1.0f
+        (L + R) / (L - R), (T + B) / (T - B), 0.0f, 1.0f
     };
 
     if (m_transformEnabled)
