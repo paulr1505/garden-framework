@@ -15,7 +15,7 @@ namespace QuakeImporter {
 
 namespace {
 
-static std::string lowerExtension(const std::string& path)
+static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); static std::string lowerExtension(const std::string& path); 
 {
     const size_t slash = path.find_last_of("/\\");
     const size_t dot = path.find_last_of('.');
@@ -165,7 +165,7 @@ Assets::LoadResult QuakeMdlLoader::loadFromFile(const std::string& path,
     Assets::LoadResult result;
 
     const std::string ext = lowerExtension(path);
-    if (ext == ".md5mesh") {
+    if (ext == ".md5mesh") { // P: ffs add animation format the mesh does not store animation THEY ARE SEPERATELY!!!!!!!
         garden::assets::MD5Model model;
         if (!model.load(path)) {
             result.error_message = "QuakeImporter: failed to parse MD5 mesh (" + path + ")";
